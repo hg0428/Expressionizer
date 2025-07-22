@@ -1,3 +1,4 @@
+import builtins
 from dataclasses import dataclass
 import math
 import sys
@@ -19,6 +20,7 @@ from expressionizer.expression import (
     is_int_or_float,
 )
 from expressionizer.render import render_latex, render_type
+from decimal import Decimal
 
 
 def round_sig(x, sig=2):
@@ -111,6 +113,7 @@ class EvaluatorContext:
     ):
         # print()
         if isinstance(original, str):
+            # print(original)
             return self.snapshots.append(TextSnapshot(original, bool(simplified)))
 
         previous = self.current_tree
@@ -379,43 +382,153 @@ def render_number_with_power_of_ten(number: int | float) -> str:
     return f"${coefficient} \\cdot 10^{{{exponent}}}$"
 
 
+def decompose_number(n):
+    s = str(format(Decimal(str(n)), "f")).replace("-", "")
+    sign = -1 if n < 0 else 1
+    if "." in s:
+        int_part, frac_part = s.split(".")
+    else:
+        int_part, frac_part = s, ""
+    result = []
+    # Integer part
+    for i, digit in enumerate(int_part):
+        power = len(int_part) - i - 1
+        value = int(digit) * (10**power) * sign
+        result.append(value)
+    # Fractional part
+    for i, digit in enumerate(frac_part):
+        value = int(digit) * (10 ** -(i + 1)) * sign
+        result.append(value)
+    return result
+
+
 def solve_sum(components, context: EvaluatorContext):
-    max_length = max(len(str(component)) for component in components)
-    addition = "```\n"
-    for component in components:
-        addition += pad(str(component), max_length) + "\n"
-    addition += "```"
+    from math import floor
+
+    # ---------- helpers ----------
+    def split_parts(s):
+        sign = -1 if s.startswith("-") else 1
+        if sign == -1:
+            s = s[1:]
+        if "." in s:
+            a, b = s.split(".", 1)
+        else:
+            a, b = s, ""
+        return sign, a, b
+
+    def lpad(s, width):
+        return "0" * (width - len(s)) + s
+
+    def rpad(s, width):
+        return s + "0" * (width - len(s))
+
+    # ---------- build aligned block ----------
+    parts = [split_parts(str(format(Decimal(str(x)), "f"))) for x in components]
+    left_max = max(len(a) for sign, a, b in parts)
+    right_max = max(len(b) for _, _, b in parts)
+    has_decimal = right_max > 0
+    has_negative = any(sign == -1 for sign, _, _ in parts)
+
+    lines = []
+    signs = []
+    for sign, a, b in parts:
+        signs.append(sign)
+        left = a
+        if has_decimal:
+            line = lpad(left, left_max) + "." + rpad(b, right_max)
+        else:
+            line = lpad(left, left_max + right_max)  # behave like old code
+        if has_negative and sign == -1:
+            line = "-" + line
+        elif has_negative:
+            line = " " + line
+        lines.append(line)
+
+    max_length = len(lines[0]) - 1 if has_negative else len(lines[0])
+    # old snapshot (exact behavior retained)
+    addition = "```\n" + "\n".join(lines) + "\n```"
     context.snap(addition, False)
-    addition = addition.split("\n")[1:-1]
+
+    # For backward-compat with your later indexing:
+    addition = addition.split("\n")[1:-1]  # trim the fences
+
+    # ---------- power map ----------
+    if has_decimal:
+        dot_idx = left_max  # same for all lines
+        power_for_col = []
+        for c in range(max_length):
+            if c == dot_idx:
+                power_for_col.append(None)
+            elif c < dot_idx:
+                power_for_col.append(dot_idx - c - 1)
+            else:
+                power_for_col.append(-(c - dot_idx))
+    else:
+        power_for_col = [None] * max_length  # will compute like before
+
     carry = 0
-    final = [None] * max_length
+    final = [None] * (max_length)
+
     for i in range(max_length):
+        col = max_length - i - 1  # right to left
+        # Decimal point column?
+        if has_decimal and col == dot_idx:
+            final[col] = "."
+            continue
+
         values = []
         for j in range(len(addition)):
-            value = addition[len(addition) - j - 1][max_length - i - 1]
-            if value not in [" ", "0"]:
-                values.append(int(value))
-        if carry > 0:
+            ch = addition[len(addition) - j - 1][col + (1 if has_negative else 0)]
+            if ch.isdigit():
+                values.append(int(ch) * signs[len(addition) - j - 1])
+        if carry != 0:
             values.append(carry)
+
         sum_values = sum(values)
-        if len(values) > 1:
-            step = f"$10^{{{i}}}$: ${' + '.join(map(str, values))} = {sum_values}$"
+        carry = (
+            math.floor(sum_values / 10)
+            if sum_values > 0
+            else math.ceil(sum_values / 10)
+        )
+        digit = sum_values - carry * 10
+        if digit < 0:  # Borrow
+            digit += 10
+            carry -= 1
+        final[col] = digit
+
+        # Determine exponent for snap text
+        if has_decimal:
+            p = power_for_col[col]
+            # Skip dot, p can be None only if no decimal or legacy path
         else:
-            step = f"$10^{{{i}}}$: ${sum_values}$"
-        # Update final
-        final[i] = sum_values % 10
-        if sum_values >= 10:
-            carry = sum_values // 10
-            step += f", carry the {carry}"
-        else:
-            carry = 0
-        context.snap(step, False)
+            p = i  # replicate original integer behavior
+
+        # keep your step text shape
+        if p is not None:
+            if len(values) > 1:
+                step = f"$10^{{{p}}}$: ${' + '.join(map(str, values))} = {sum_values}$"
+            else:
+                step = f"$10^{{{p}}}$: ${sum_values}$"
+            if carry > 0:
+                step += f", carry the {carry}."
+            elif carry < 0:
+                step += f", borrow a {-carry} and add 10 to get {digit}."
+            context.snap(step, False)
+    # leftover carry
     if carry > 0:
-        final.append(carry)
-        context.snap(f"$10^{{{max_length}}}$: {carry} (carried)", False)
-    final = reversed(final)
-    result = int("".join(map(str, final)))
+        # put carry to the left of everything (may need more than 1 digit)
+        c_str = str(abs(carry))
+        final = list(c_str) + final
+        context.snap(f"$10^{{{p+1}}}$: {carry} (carried)", False)
+        carry = 0
+    result_str = "".join(str(x) for x in final).strip()
+
+    # Convert for return (keep int for old path)
+    result = float(result_str) if "." in result_str else int(result_str)
+    if carry < 0:
+        result = -carry * 10 ** (p + 1) - result
     context.snap(f"Putting it together, we get ${result}$.", False)
+    context.snap(Sum(components), result)
     return result
 
 
@@ -430,13 +543,8 @@ def add(a, b, context: EvaluatorContext):
     ):
         context.snap(Sum([a, b]), a + b)
         return a + b
-    a_str, b_str = str(a), str(b)
-    a_components = [
-        int(digit) * 10 ** (len(a_str) - i - 1) for i, digit in enumerate(a_str)
-    ]
-    b_components = [
-        int(digit) * 10 ** (len(b_str) - i - 1) for i, digit in enumerate(b_str)
-    ]
+    a_components = decompose_number(a)
+    b_components = decompose_number(b)
     all_components = a_components + b_components
     context.snap(f"Let's break ${a}$ and ${b}$ down into their components.", False)
     context.snap(Sum([a, b]), Sum(all_components))
@@ -481,7 +589,7 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
         else:
             context.snap(
                 Product([Sum([a_nearest_round, -a_round_distance]), b]),
-                Sum([a_nearest_round * b, Product([-a_round_distance, b])]),
+                Sum([a_nearest_round * b, -Product([a_round_distance, b])]),
             )
             result = multiply(a_round_distance, b, context, quick_compute=False)
             context.snap(
@@ -572,10 +680,10 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
                 False,
             )
         total_exponent += b_exponent
-    if total_exponent != 0:
+    if a != a_coefficient or b != b_coefficient:
         context.snap(
             Product([a, b]),
-            Product([a_coefficient, b_coefficient, Power(10, -total_exponent)]),
+            Product([a_coefficient, b_coefficient, Power(10, total_exponent)]),
         )
     a = a_coefficient
     b = b_coefficient
@@ -583,12 +691,8 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
     a = int(a)
     b = int(b)
     a_str, b_str = str(a), str(b)
-    a_components = [
-        int(digit) * 10 ** (len(a_str) - i - 1) for i, digit in enumerate(a_str)
-    ]
-    b_components = [
-        int(digit) * 10 ** (len(b_str) - i - 1) for i, digit in enumerate(b_str)
-    ]
+    a_components = decompose_number(a)
+    b_components = decompose_number(b)
 
     rows = [
         [""]
@@ -626,10 +730,9 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
     if context.options.slow_step_addition:
         context.snap("**List of values to add:**", False)
         result = solve_sum(all_components, context)
-        context.snap(Sum(all_components), result)
         if total_exponent != 0:
             context.snap(
-                Product([result, Power(10, -total_exponent)]),
+                Product([result, Power(10, total_exponent)]),
                 result * 10**total_exponent,
             )
             result *= 10**total_exponent
@@ -711,6 +814,8 @@ def replace_sub(expr, target, replacement):
                 for factor in expr.factors:
                     if isinstance(factor, Product):
                         expr_factors.extend(factor.factors)
+                    elif isinstance(factor, Sum) and len(factor.terms) == 1:
+                        expr_factors.append(factor.terms[0])
                     elif is_int_or_float(factor):
                         expr_sign *= 1 if factor >= 0 else -1
                         if abs(factor) != 1:
@@ -720,6 +825,8 @@ def replace_sub(expr, target, replacement):
                 for factor in target.factors:
                     if isinstance(factor, Product):
                         target_factors.extend(factor.factors)
+                    elif isinstance(factor, Sum) and len(factor.terms) == 1:
+                        target_factors.append(factor.terms[0])
                     elif is_int_or_float(factor):
                         target_sign *= 1 if factor >= 0 else -1
                         if abs(factor) != 1:
@@ -917,6 +1024,7 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                     result = evaluate_expression(new_expression, context)
                 else:
                     result = base**exponent
+                    print(expression, result)
                     context.snap(
                         expression,
                         result,
@@ -924,17 +1032,29 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
             else:
                 result = power(base, exponent)
         case Product():
+            if 0 in expression.factors:
+                context.snap(expression, 0)
+                return 0
             factors = [
                 evaluate_expression(factor, context) for factor in expression.factors
             ]
-            factors = sorted(factors, key=numerical_sort_key)
-            new_expression = product([arg for arg in factors])
-            if all(is_int_or_float(factor) for factor in factors):
+            if len(factors) == 1:
+                current_expression = Product(factors)
+                context.snap(current_expression, factors[0])
                 result = factors[0]
-                for factor in factors[1:]:
-                    result = multiply(result, factor, context)
+            elif 0 in factors:
+                current_expression = Product(factors)
+                context.snap(current_expression, 0)
+                result = 0
             else:
-                result = new_expression
+                factors = sorted(factors, key=numerical_sort_key)
+                new_expression = product([arg for arg in factors])
+                if all(is_int_or_float(factor) for factor in factors):
+                    result = factors[0]
+                    for factor in factors[1:]:
+                        result = multiply(result, factor, context)
+                else:
+                    result = new_expression
         case Sum():
             terms = [evaluate_expression(term, context) for term in expression.terms]
             terms = sorted(terms, key=numerical_sort_key_reverse)
@@ -1013,4 +1133,8 @@ def evaluate(expression: Numerical, substitutions: dict[str, int | float] = {}):
         )
     else:
         context.snap(expression, new_expression)
+    # try:
     return evaluate_expression(new_expression, context), context
+    # except Exception as e:
+    #     print(e)
+    #     return None, context

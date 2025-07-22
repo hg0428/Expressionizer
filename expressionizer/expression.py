@@ -176,7 +176,7 @@ class Power:
             case Sum() if len(other.terms) == 1 and len(other.terms[0].factors) == 1:
                 factor = other.terms[0].factors[0]
         return (
-            factor is not None
+            isinstance(factor, Power)
             and factor.base == self.base
             and factor.exponent == self.exponent
         )
@@ -357,10 +357,29 @@ class Product:
 
     def __eq__(self, other: Numerical):
         if isinstance(other, Product):
-            if len(self.factors) != len(other.factors):
+            self_factors, other_factors = [], []
+            for factor in self.factors:
+                if isinstance(factor, Power) and (
+                    factor.exponent == 0 or factor.base == 1
+                ):
+                    pass
+                elif factor == 1:
+                    pass
+                else:
+                    self_factors.append(factor)
+            for factor in other.factors:
+                if isinstance(factor, Power) and (
+                    factor.exponent == 0 or factor.base == 1
+                ):
+                    pass
+                elif factor == 1:
+                    pass
+                else:
+                    other_factors.append(factor)
+            if len(self_factors) != len(other_factors):
                 return False
-            for i in range(len(self.factors)):
-                if self.factors[i] != other.factors[i]:
+            for i in range(len(self_factors)):
+                if self_factors[i] != other_factors[i]:
                     return False
             return True
         return False
@@ -395,9 +414,19 @@ class Product:
             self_factors = []
             for factor in self.factors:
                 if isinstance(factor, Product):
-                    self_factors.extend([abs(factor) for factor in factor.factors])
+                    self_factors.extend(
+                        [
+                            (abs(factor) if is_int_or_float(factor) else factor)
+                            for factor in factor.factors
+                        ]
+                    )
                 elif isinstance(factor, Sum) and len(factor.terms) <= 1:
-                    self_factors.extend([abs(term) for term in factor.terms])
+                    self_factors.extend(
+                        [
+                            (abs(term) if is_int_or_float(term) else term)
+                            for term in factor.terms
+                        ]
+                    )
                 elif is_int_or_float(factor):
                     self_factors.append(abs(factor))
                 else:
@@ -409,6 +438,9 @@ class Product:
 
     def __bool__(self):
         return True
+
+    def __neg__(self):
+        return Product(self.factors.copy() + [-1])
 
 
 class Sum:

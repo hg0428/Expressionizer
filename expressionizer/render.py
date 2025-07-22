@@ -1,20 +1,31 @@
-from ast import Num
 import math
 from .expression import *
 
 
 @dataclass
 class LaTeXRenderOptions:
-    group_exponentiation: bool = False  # Implemented
-    parentheses_function_call: bool = False  # Implemented
-    backslash_function_call: bool = True  # Implemented
-    product_separator: str = ""  # Implemented
-    always_use_product_parentheses = False
-    use_parentheses_for_literal_product = True
-    group_on_one_argument_function: bool = True  # Implemented
-    fraction_as_inline: bool = False  # Implemented
-    negative_exponent_as_fraction: bool = True  # Implemented
-    compact_exponents: bool = True  # Implemented
+    group_exponentiation: bool = (
+        False  # Always add a group around exponentiation, even when it is otherwise clear.
+    )
+    parentheses_function_call: bool = False  # Use parentheses rather than {}
+    backslash_function_call: bool = True  # Put a backslash before the function call
+    product_separator: str = (
+        ""  # Default product separator for cases when it is clear either way.
+    )
+    always_use_product_parentheses = False  # Always used parentheses around factors in a product, even if it is clear otherwise
+    use_parentheses_for_literal_product = (
+        True  # Use parentheses rather than \cdot when multiplying literals
+    )
+    group_on_one_argument_function: bool = (
+        True  # Do you need the grouping ({} or ()) if it only has one argument
+    )
+    fraction_as_inline: bool = False  # \frac vs just using /
+    negative_exponent_as_fraction: bool = (
+        True  # Convert negative exponents to fractions.
+    )
+    compact_exponents: bool = (
+        True  # In cases where it is clear either way, compact_exponents will use x^y instead of x^{y}
+    )
 
 
 def apply_group(text, paren=False, square=False, curly=False):
@@ -203,21 +214,18 @@ def render_latex(
             else:
                 result = ""
                 prev = None
+                prev_rendered = None
                 for i, factor in enumerate(expression.factors):
                     rendered_factor = render_latex(factor, renderOptions, True)
+
                     if i > 0:
                         can_use_implicit = (
                             not (
                                 (
-                                    is_int_or_float(factor)
-                                    or isinstance(factor, Power)
-                                    and is_int_or_float(factor.base)
+                                    rendered_factor[0].isnumeric()
+                                    and (prev_rendered[-1].isnumeric())
                                 )
-                                and (
-                                    is_int_or_float(prev)
-                                    or isinstance(prev, Power)
-                                    and is_int_or_float(prev.base)
-                                )
+                                or rendered_factor[0] == "-"
                             )
                         ) or renderOptions.product_separator != ""
                         if (
@@ -231,6 +239,7 @@ def render_latex(
                             result += renderOptions.product_separator + rendered_factor
                     else:
                         result += rendered_factor
+                    prev_rendered = rendered_factor
                     prev = factor
                 return result
         case Sum():
@@ -331,7 +340,7 @@ if __name__ == "__main__":
     # print(render_latex(expression))
 
     # 1. Simple sum and product
-    expression1 = Product([Sum([1, 2, 3, 4]), Sum([435, 2345, 1, 2])])
+    expression1 = Sum([Power(-18, -1.9), 4, Product([-47, 0])])
     print(render(expression1))
     print(render_latex(expression1))
     print()

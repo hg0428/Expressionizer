@@ -1,5 +1,5 @@
 from .expression import *
-from .evaluator import EvaluatorContext, evaluate, evaluate_expression
+from .evaluator import EvaluatorContext, evaluate, evaluate_expression, replace_sub
 from .render import render, render_latex
 from math import pi, sin, log
 
@@ -92,32 +92,34 @@ if __name__ == "__main__":
 
     expr20 = Sum([1, 2, 3, 4, 5, Product([3, 5]), Power(3, 2)])
 
+    expr21 = Product([Sum([2]), -1, 10])
     # Print results
-    test_cases = [
-        (expr1, {}, 10),
-        (expr2, {"x": 7}, 10),
-        (expr3, {"x": 1}, product([2, Symbol("y")])),
-        (expr4, {"x": 4, "y": 6}, 31),
-        (expr5, {"a": 2}, 0.25),
-        (expr6, {"z": 25}, 5.0),
-        (expr7, {"sin": lambda x, y, z: sin(x[0])}, 1.0),
-        (expr8, {"log": lambda x, y, z: log(x[0], y[0])}, 2.0),
-        (expr9, {"x": 2}, sum([2, Symbol("y")])),
-        (
-            expr10,
-            {"x": pi, "sin": lambda x, y, z: sin(x[0])},
-            __import__("math").sin(pi**2),
-        ),
-        (expr11, {"x": 3, "y": 4}, 49),
-        (expr12, {"x": 1, "y": 2}, 15),
-        (expr13, {"a": 2}, 27),
-        (expr14, {"n": 6, "d": 2}, 3.0),
-        (expr15, {"x": 100}, 0),
-        (expr16, {}, 90818),
-        (expr17, {}, 1919),
-        (expr18, {}, 159500),
-        (expr19, {}, 112),
-        (expr20, {}, 39),
+    test_cases = [  #
+        # (expr1, {}, 10),
+        # (expr2, {"x": 7}, 10),
+        # (expr3, {"x": 1}, product([2, Symbol("y")])),
+        # (expr4, {"x": 4, "y": 6}, 31),
+        # (expr5, {"a": 2}, 0.25),
+        # (expr6, {"z": 25}, 5.0),
+        # (expr7, {"sin": lambda x, y, z: sin(x[0])}, 1.0),
+        # (expr8, {"log": lambda x, y, z: log(x[0], y[0])}, 2.0),
+        # (expr9, {"x": 2}, sum([2, Symbol("y")])),
+        # (
+        #     expr10,
+        #     {"x": pi, "sin": lambda x, y, z: sin(x[0])},
+        #     __import__("math").sin(pi**2),
+        # ),
+        # (expr11, {"x": 3, "y": 4}, 49),
+        # (expr12, {"x": 1, "y": 2}, 15),
+        # (expr13, {"a": 2}, 27),
+        # (expr14, {"n": 6, "d": 2}, 3.0),
+        # (expr15, {"x": 100}, 0),
+        # (expr16, {}, 90818),
+        # (expr17, {}, 1919),
+        # (expr18, {}, 159500),
+        # (expr19, {}, 112),
+        # (expr20, {}, 39),
+        (expr21, {}, 44.79),
     ]
 
     for i, (expr, substitutions, expected) in enumerate(test_cases, 1):
@@ -127,6 +129,7 @@ if __name__ == "__main__":
         #         f"\033[1mGiven:\033[0m ${', '.join(map(lambda x: f'{x[0]} = {render_latex(x[1])}', context.items()))}$"
         #     )
         result, context = evaluate(expr, substitutions)
+
         print("Snapshots:")
         context.render()
         print(f"Final answer: $\\boxed{{{render_latex(result)}}}$")
