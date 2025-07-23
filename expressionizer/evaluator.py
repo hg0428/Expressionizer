@@ -570,7 +570,6 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
         and -limit <= b_coefficient <= limit
         or (a_coefficient == 1 or b_coefficient == 1)
     ):
-        print("quick compute")
         context.snap(Product([a, b]), a * b)
         return a * b
     a_nearest_round = 10 ** (len(str(a)))
