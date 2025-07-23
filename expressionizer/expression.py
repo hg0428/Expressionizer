@@ -40,6 +40,39 @@ class Symbol:
             return self.name == other.name
         return False
 
+    def __mul__(self, other):
+        return Product([self, other])
+
+    def __rmul__(self, other):
+        return Product([other, self])
+
+    def __truediv__(self, other):
+        return Product([self, Power(other, -1)])
+
+    def __rtruediv__(self, other):
+        return Product([Power(self, -1), other])
+
+    def __pow__(self, other):
+        return Power(self, other)
+
+    def __rpow__(self, other):
+        return Power(other, self)
+
+    def __neg__(self):
+        return Product([-1, self])
+
+    def __pos__(self):
+        return self
+
+    def __call__(self, other):
+        return Product([self, other])
+
+    def __add__(self, other):
+        return Sum([self, other])
+
+    def __radd__(self, other):
+        return Sum([other, self])
+
     def __bool__(self):
         return True
 
@@ -139,7 +172,14 @@ class MathFunction:
         )
 
     def __hash__(self):
-        return hash((self.name, self.functional_parameters))
+        return hash(
+            (
+                self.name,
+                self.functional_parameters,
+                self.subscript_parameters,
+                self.superscript_parameters,
+            )
+        )
 
     def __bool__(self):
         return True
@@ -171,10 +211,14 @@ class Power:
         match other:
             case Power():
                 factor = other
-            case Product() if len(other.factors) == 1:
+            case Product() if len(other.factors) == 1 and isinstance(
+                other.factors[0], Power
+            ):
                 factor = other.factors[0]
-            case Sum() if len(other.terms) == 1 and len(other.terms[0].factors) == 1:
-                factor = other.terms[0].factors[0]
+            case Sum() if len(other.terms) == 1 and isinstance(other.terms[0], Power):
+                factor = other.terms[0]
+            case int() | float():
+                return self.base == other and self.exponent == 1
         return (
             isinstance(factor, Power)
             and factor.base == self.base
@@ -218,7 +262,7 @@ class Power:
         return power(other, self)
 
     def __neg__(self):
-        return power(self.base, -self.coefficient, self.exponent)
+        return Product([-1, Power(self.base, self.exponent)])
 
     def __call__(self, other: Numerical):
         return self.__mul__(other)
@@ -306,6 +350,9 @@ class FunctionCall:
                     return False
             return True
         return False
+
+    def __neg__(self):
+        return Product([self, -1])
 
 
 class Product:
@@ -404,9 +451,19 @@ class Product:
             other_factors = []
             for factor in other.factors:
                 if isinstance(factor, Product):
-                    other_factors.extend([abs(factor) for factor in factor.factors])
+                    other_factors.extend(
+                        [
+                            (abs(factor) if is_int_or_float(factor) else factor)
+                            for factor in factor.factors
+                        ]
+                    )
                 elif isinstance(factor, Sum) and len(factor.terms) <= 1:
-                    other_factors.extend([abs(term) for term in factor.terms])
+                    other_factors.extend(
+                        [
+                            (abs(term) if is_int_or_float(term) else term)
+                            for term in factor.terms
+                        ]
+                    )
                 elif is_int_or_float(factor):
                     other_factors.append(abs(factor))
                 else:
@@ -701,7 +758,7 @@ def sum(terms: list[Numerical] | Sum):
         else:
             terms_count[term] = 1
 
-    new_terms = [numerical]
+    new_terms = [numerical] if numerical != 0 else []
     for term, count in terms_count.items():
         if count == 1:
             new_terms.append(term)

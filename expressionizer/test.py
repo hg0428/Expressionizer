@@ -86,13 +86,22 @@ if __name__ == "__main__":
     expr17 = Sum([921, 998])
     expr18 = Sum([13500, 146000])
 
-    expr19 = Sum([12, 4, Product([3, Power(2, 5)])])
+    expr19 = Sum([0, Product([2, 13])])
     # expr19 = Product([2, 3, 4, Sum([10, 11])])
     # expr19 = Product([2, Sum([5, 9])])
 
     expr20 = Sum([1, 2, 3, 4, 5, Product([3, 5]), Power(3, 2)])
 
     expr21 = Product([Sum([2]), -1, 10])
+    expr22 = Sum(
+        [
+            Product([Sum([1, 4, Symbol("x")]), -1]),
+            Power(2, 2),
+            Product([3, Symbol("x")]),
+        ]
+    )
+    expr23 = Sum([Sum([1]), Product([2])])
+
     # Print results
     test_cases = [  #
         # (expr1, {}, 10),
@@ -117,9 +126,11 @@ if __name__ == "__main__":
         # (expr16, {}, 90818),
         # (expr17, {}, 1919),
         # (expr18, {}, 159500),
-        # (expr19, {}, 112),
-        # (expr20, {}, 39),
+        (expr19, {}, 112),
+        (expr20, {}, 39),
         (expr21, {}, 44.79),
+        (expr22, {}, 20),
+        (expr23, {}, 112),
     ]
 
     for i, (expr, substitutions, expected) in enumerate(test_cases, 1):
@@ -130,8 +141,8 @@ if __name__ == "__main__":
         #     )
         result, context = evaluate(expr, substitutions)
 
-        print("Snapshots:")
-        context.render()
+        print(f"Problem: $", render_latex(expr), "$.")
+        print(context.render())
         print(f"Final answer: $\\boxed{{{render_latex(result)}}}$")
         # print(f"Test {i}: {render_latex(result)!r} (Expected: {expected!r})")
-        print("\n\n")
+        print("\n")

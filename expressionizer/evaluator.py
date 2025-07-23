@@ -101,6 +101,7 @@ class EvaluatorContext:
         self.substitutions = substitutions
         self.snapshots = [Snapshot(tree, tree, tree, tree)]
         self.current_tree = tree
+        self.original_tree = tree
         self.options = options
         self.error_on_invalid_snap = error_on_invalid_snap
         self.error_count = 0
@@ -121,15 +122,15 @@ class EvaluatorContext:
         new_tree = replace_sub(self.current_tree, original, simplified)
 
         snapshot = Snapshot(original, simplified, previous, new_tree)
-        # print("Old tree:", render_latex(previous))
-        # print("Original:", render_latex(original))
-        # print("Simplified:", render_latex(simplified))
-        # print("New tree:", render_latex(new_tree))
+        # print("Old tree:", render_type(previous))
+        # print("Original:", render_type(original))
+        # print("Simplified:", render_type(simplified))
+        # print("New tree:", render_type(new_tree))
         # print("\n")
         if contains(self.current_tree, original) <= 0:
             if self.error_on_invalid_snap:
                 raise ValueError(
-                    f"Original {render_latex(original)} not found in current tree {render_latex(self.current_tree)}"
+                    f"Original {render_latex(original)} not found in current tree {render_latex(self.current_tree)}.\n{render_type(self.original_tree)}"
                 )
         else:
             self.error_count += 1
@@ -284,11 +285,14 @@ class EvaluatorContext:
             step = [substep for substep in step if substep != ""]
             if step:
                 filtered_steps.append(step)
+        if len(filtered_steps) == 1:
+            return "\n".join(filtered_steps[0])
+        text = ""
         for i, step in enumerate(filtered_steps):
-            print(f"## Step {i+1}")
+            text += f"## Step {i+1}\n"
             for substep in step:
-                print(substep)
-        return filtered_steps
+                text += substep + "\n"
+        return text
 
 
 def pad(iterable, size, value=None, side="left"):
@@ -566,6 +570,7 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
         and -limit <= b_coefficient <= limit
         or (a_coefficient == 1 or b_coefficient == 1)
     ):
+        print("quick compute")
         context.snap(Product([a, b]), a * b)
         return a * b
     a_nearest_round = 10 ** (len(str(a)))
@@ -844,6 +849,8 @@ def replace_sub(expr, target, replacement):
                 if new_sign < 0:
                     new_factors.append(-1)
                 if len(target_factors) == 0:
+                    if len(new_factors) == 1:
+                        return new_factors[0]
                     return Product(new_factors)
             elif (
                 len(expr.factors) == 2
@@ -864,8 +871,8 @@ def replace_sub(expr, target, replacement):
                 for term in expr.terms:
                     if isinstance(term, Sum):
                         expr_terms.extend(term.terms)
-                    elif isinstance(term, Product) and len(term.factors) == 1:
-                        expr_terms.append(term.factors[0])
+                    # elif isinstance(term, Product) and len(term.factors) == 1:
+                    #     expr_terms.append(term.factors[0])
                     elif (
                         isinstance(term, Product)
                         and len(term.factors) == 2
@@ -896,6 +903,8 @@ def replace_sub(expr, target, replacement):
                     else:
                         new_terms.append(term)
                 if len(target_terms) == 0:
+                    if len(new_terms) == 1:
+                        return new_terms[0]
                     return Sum(new_terms)
             return Sum([replace_sub(t, target, replacement) for t in expr.terms])
         case FunctionCall():
@@ -942,6 +951,30 @@ def contains(expr, target):
             )
         case _:
             return 0
+
+
+def _get_term_parts(term):
+    """Separates a term into its coefficient and variable parts."""
+    if isinstance(term, (int, float)):
+        return term, 1
+
+    if isinstance(term, Product):
+        coefficient = 1
+        variable_factors = []
+        for factor in term.factors:
+            if isinstance(factor, (int, float)):
+                coefficient *= factor
+            else:
+                variable_factors.append(factor)
+
+        if not variable_factors:
+            return coefficient, 1
+        if len(variable_factors) == 1:
+            return coefficient, variable_factors[0]
+        return coefficient, Product(variable_factors)
+
+    # For Symbols, Powers, and other expressions, the coefficient is 1
+    return 1, term
 
 
 def get_fraction(expr):
@@ -1024,13 +1057,16 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                     result = evaluate_expression(new_expression, context)
                 else:
                     result = base**exponent
-                    print(expression, result)
                     context.snap(
                         expression,
                         result,
                     )
             else:
                 result = power(base, exponent)
+                context.snap(
+                    expression,
+                    result,
+                )
         case Product():
             if 0 in expression.factors:
                 context.snap(expression, 0)
@@ -1038,33 +1074,120 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
             factors = [
                 evaluate_expression(factor, context) for factor in expression.factors
             ]
+            current_expression = Product(factors)
             if len(factors) == 1:
-                current_expression = Product(factors)
                 context.snap(current_expression, factors[0])
-                result = factors[0]
+                return factors[0]
             elif 0 in factors:
-                current_expression = Product(factors)
                 context.snap(current_expression, 0)
-                result = 0
+                return 0
             else:
+                # Check for a Sum to distribute
+                sum_to_distribute = None
+                for i, factor in enumerate(factors):
+                    if isinstance(factor, Sum):
+                        sum_to_distribute = factor
+                        # Keep track of which factor was the sum
+                        sum_index = i
+                        break
+
+                if sum_to_distribute:
+                    other_factors = [
+                        factor for i, factor in enumerate(factors) if i != sum_index
+                    ]
+                    new_terms = []
+                    for term in sum_to_distribute.terms:
+                        # Create a new product for each term in the sum
+                        new_factors = other_factors + [term]
+                        new_product = product(new_factors)
+                        new_terms.append(new_product)
+
+                    # The new expression is a sum of these new products
+                    distributed_sum = Sum(new_terms)
+                    context.snap(current_expression, distributed_sum)
+                    return evaluate_expression(distributed_sum, context)
+                # Original logic if no distribution is needed
                 factors = sorted(factors, key=numerical_sort_key)
-                new_expression = product([arg for arg in factors])
                 if all(is_int_or_float(factor) for factor in factors):
                     result = factors[0]
                     for factor in factors[1:]:
                         result = multiply(result, factor, context)
                 else:
-                    result = new_expression
+                    new_expression = product([arg for arg in factors])
+                    context.snap(current_expression, new_expression)
+                    return new_expression
         case Sum():
+            # Stage 1: Recursively evaluate all terms first.
             terms = [evaluate_expression(term, context) for term in expression.terms]
-            terms = sorted(terms, key=numerical_sort_key_reverse)
-            new_expression = sum([arg for arg in terms])
-            if all(is_int_or_float(term) for term in terms):
-                result = terms[0]
-                for term in terms[1:]:
-                    result = add(result, term, context)
-            else:
-                result = new_expression
+            expression = Sum(terms)
+
+            # Stage 2: Flatten nested Sums.
+            flattened_terms = []
+            needs_flattening = any(isinstance(t, Sum) for t in terms)
+            if needs_flattening:
+                for term in terms:
+                    if isinstance(term, Sum):
+                        flattened_terms.extend(term.terms)
+                    elif isinstance(term, Product) and len(term.factors) == 1:
+                        flattened_terms.append(term.factors[0])
+                    else:
+                        flattened_terms.append(term)
+                new_sum = Sum(flattened_terms)
+                context.snap(expression, new_sum)
+                expression = new_sum
+                terms = flattened_terms
+
+            # Stage 3: Combine numeric terms.
+            numeric_terms = [t for t in terms if is_int_or_float(t)]
+            variable_terms = [t for t in terms if not is_int_or_float(t)]
+            if len(numeric_terms) > 1:
+                numeric_sum = sum(numeric_terms)
+                new_terms = [numeric_sum] + variable_terms
+                new_sum = Sum(new_terms)
+                context.snap(expression, new_sum)
+                expression = new_sum
+                terms = new_terms
+                numeric_terms = [numeric_sum]
+            elif len(numeric_terms) == 1:
+                numeric_sum = numeric_terms[0]
+            if len(variable_terms) == 0 and len(numeric_terms) == 1:
+                return numeric_terms[0]
+
+            # Stage 4: Combine like variable terms.
+            grouped_terms = {}
+            for term in variable_terms:
+                coefficient, variable_part = _get_term_parts(term)
+                if variable_part not in grouped_terms:
+                    grouped_terms[variable_part] = [0, variable_part]
+                grouped_terms[variable_part][0] += coefficient
+
+            reconstructed_terms = []
+            for _, (coefficient, variable_part) in grouped_terms.items():
+                if coefficient == 0:
+                    continue
+                if variable_part == 1:
+                    reconstructed_terms.append(coefficient)
+                elif coefficient == 1:
+                    reconstructed_terms.append(variable_part)
+                else:
+                    reconstructed_terms.append(Product([coefficient, variable_part]))
+            final_terms = numeric_terms + reconstructed_terms
+            if len(final_terms) != len(terms):
+                if not final_terms:
+                    result = 0
+                elif len(final_terms) == 1:
+                    result = final_terms[0]
+                else:
+                    result = Sum(final_terms)
+                context.snap(expression, result)
+                return result
+            if len(final_terms) == 1:
+                result = final_terms[0]
+                context.snap(expression, result)
+                return result
+
+            return expression
+
         case FunctionCall():
             state = context.save_state()
             functional_arguments = [
@@ -1079,7 +1202,17 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                 evaluate_expression(arg, context)
                 for arg in expression.superscript_arguments
             ]
-            if expression.function.name in context.substitutions:
+            if expression.function in context.substitutions and all(
+                is_int_or_float(arg) for arg in functional_arguments
+            ):
+                result = context.substitutions[expression.function](
+                    [arg for arg in functional_arguments],
+                    [arg for arg in subscript_arguments],
+                    [arg for arg in superscript_arguments],
+                )
+            elif expression.function.name in context.substitutions and all(
+                is_int_or_float(arg) for arg in functional_arguments
+            ):
                 result = context.substitutions[expression.function.name](
                     [arg for arg in functional_arguments],
                     [arg for arg in subscript_arguments],
@@ -1134,7 +1267,11 @@ def evaluate(expression: Numerical, substitutions: dict[str, int | float] = {}):
     else:
         context.snap(expression, new_expression)
     # try:
-    return evaluate_expression(new_expression, context), context
+    result = evaluate_expression(new_expression, context)
+    if isinstance(result, float) and result.is_integer():
+        result = int(result)
+
+    return result, context
     # except Exception as e:
     #     print(e)
     #     return None, context
