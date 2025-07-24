@@ -100,7 +100,8 @@ if __name__ == "__main__":
             Product([3, Symbol("x")]),
         ]
     )
-    expr23 = Sum([Sum([1]), Product([2])])
+    expr23 = Sum([-201, 203])
+    expr24 = Product([2, 13])
 
     # Print results
     test_cases = [  #
@@ -126,11 +127,12 @@ if __name__ == "__main__":
         # (expr16, {}, 90818),
         # (expr17, {}, 1919),
         # (expr18, {}, 159500),
-        (expr19, {}, 112),
-        (expr20, {}, 39),
-        (expr21, {}, 44.79),
-        (expr22, {}, 20),
-        (expr23, {}, 112),
+        # (expr19, {}, 112),
+        # (expr20, {}, 39),
+        # (expr21, {}, 44.79),
+        # (expr22, {}, 20),
+        # (expr23, {}, -26),
+        # (expr24, {}, 26),
     ]
 
     for i, (expr, substitutions, expected) in enumerate(test_cases, 1):

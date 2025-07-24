@@ -408,8 +408,10 @@ def generate_random_expression(
         return Symbol(variable_name)
 
     # Base case for recursion
-    p = 0.5 + 0.5 * (_depth / max_depth)
-    if _depth >= max_depth or random.random() < p:
+    p = 0.3 + 0.7 * (_depth / max_depth)
+    if (_depth >= max_depth or random.random() < p) and (
+        _depth > 0 or random.random() < 0.0005
+    ):
         if random.random() < 0.8:
             return generate_number(
                 mean=mean,
@@ -503,15 +505,18 @@ def generate_random_expression(
 if __name__ == "__main__":
     # for i in range(100):
     #     print(generate_number())
-    for i in range(10):
-        print("\n")
-        expression_context = ExpressionContext()
-        expression = generate_random_expression()
-        print("Expression: $", render_latex(expression), "$")
-        print(render_type(expression))
-        substitutions = expression_context.substitutions
-        substitutions.update(FUNCTIONS)
-        answer, context = evaluate(expression, substitutions)
-        text = context.render()
-        print(text)
-        print(f"Final answer: $\\boxed{{{render_latex(answer)}}}$")
+    for i in range(2000):
+        try:
+            print("\n")
+            expression_context = ExpressionContext()
+            expression = generate_random_expression()
+            print("Expression: $", render_latex(expression), "$")
+            print(render_type(expression))
+            substitutions = expression_context.substitutions
+            substitutions.update(FUNCTIONS)
+            answer, context = evaluate(expression, substitutions)
+            text = context.render()
+            print(text)
+            print(f"Final answer: $\\boxed{{{render_latex(answer)}}}$")
+        except Exception as e:
+            pass

@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: expressionizer
-Version: 0.6.0
+Version: 0.6.4
 Summary: A Python library for symbolic math expressions and evaluation.
 Author-email: Hudson Gouge <hudson.gouge@icloud.com>
 License: MIT

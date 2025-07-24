@@ -76,6 +76,9 @@ class Symbol:
     def __bool__(self):
         return True
 
+    def __len__(self):
+        return 1
+
 
 class MathFunction:
     __match_args__ = (
@@ -270,6 +273,11 @@ class Power:
     def __bool__(self):
         return True
 
+    def __len__(self):
+        return (1 if is_int_or_float(self.base) else len(self.base)) + (
+            1 if is_int_or_float(self.exponent) else len(self.exponent)
+        )
+
 
 class FunctionCall:
     __match_args__ = (
@@ -353,6 +361,16 @@ class FunctionCall:
 
     def __neg__(self):
         return Product([self, -1])
+
+    def __len__(self):
+        total = 0
+        for arg in (
+            self.functional_arguments
+            + self.subscript_arguments
+            + self.superscript_arguments
+        ):
+            total += 1 if is_int_or_float(arg) else len(arg)
+        return total
 
 
 class Product:
@@ -499,6 +517,12 @@ class Product:
     def __neg__(self):
         return Product(self.factors.copy() + [-1])
 
+    def __len__(self):
+        total = 0
+        for factor in self.factors:
+            total += 1 if is_int_or_float(factor) else len(factor)
+        return total
+
 
 class Sum:
     __match_args__ = ("terms",)
@@ -610,6 +634,12 @@ class Sum:
 
     def __bool__(self):
         return True
+
+    def __len__(self):
+        total = 0
+        for term in self.terms:
+            total += 1 if is_int_or_float(term) else len(term)
+        return total
 
 
 Numerical = int | float | Power | Product | Sum | FunctionCall | Symbol

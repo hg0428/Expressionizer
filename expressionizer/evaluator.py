@@ -36,6 +36,7 @@ class EvaluatorOptions:
     slow_step_addition: bool = True
     expand_powers: bool = True
     max_precision: int = 5
+    max_exponent: int = 100
 
 
 class Snapshot:
@@ -117,6 +118,13 @@ class EvaluatorContext:
             # print(original)
             return self.snapshots.append(TextSnapshot(original, bool(simplified)))
 
+        if contains(self.current_tree, original) <= 0:
+            if self.error_on_invalid_snap:
+                raise ValueError(
+                    f"Original {render_latex(original)} not found in current tree {render_latex(self.current_tree)}.\n{render_type(self.original_tree)}"
+                )
+            else:
+                self.error_count += 1
         previous = self.current_tree
 
         new_tree = replace_sub(self.current_tree, original, simplified)
@@ -127,13 +135,6 @@ class EvaluatorContext:
         # print("Simplified:", render_type(simplified))
         # print("New tree:", render_type(new_tree))
         # print("\n")
-        if contains(self.current_tree, original) <= 0:
-            if self.error_on_invalid_snap:
-                raise ValueError(
-                    f"Original {render_latex(original)} not found in current tree {render_latex(self.current_tree)}.\n{render_type(self.original_tree)}"
-                )
-        else:
-            self.error_count += 1
 
         if explanation:
             snapshot.explanation = explanation.format(
@@ -529,8 +530,9 @@ def solve_sum(components, context: EvaluatorContext):
 
     # Convert for return (keep int for old path)
     result = float(result_str) if "." in result_str else int(result_str)
+    print(result, carry)
     if carry < 0:
-        result = -carry * 10 ** (p + 1) - result
+        result = -(-carry * 10 ** (p + 1) - result)
     context.snap(f"Putting it together, we get ${result}$.", False)
     context.snap(Sum(components), result)
     return result
@@ -1040,6 +1042,11 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                 exponent = evaluate_expression(expression.exponent, context)
             expression = Power(base, exponent)
             if is_int_or_float(base) and is_int_or_float(exponent):
+                if (
+                    exponent > context.options.max_exponent
+                    or exponent < -context.options.max_exponent
+                ):
+                    return float("inf")  # Infinity, too large to compute
                 if context.options.expand_powers and exponent > 1:
                     new_expression = Product(
                         [base] * math.floor(exponent)
@@ -1140,7 +1147,9 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
             numeric_terms = [t for t in terms if is_int_or_float(t)]
             variable_terms = [t for t in terms if not is_int_or_float(t)]
             if len(numeric_terms) > 1:
-                numeric_sum = sum(numeric_terms)
+                numeric_sum = numeric_terms[0]
+                for term in numeric_terms[1:]:
+                    numeric_sum = add(numeric_sum, term, context)
                 new_terms = [numeric_sum] + variable_terms
                 new_sum = Sum(new_terms)
                 context.snap(expression, new_sum)
@@ -1233,10 +1242,15 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
     return result
 
 
-def evaluate(expression: Numerical, substitutions: dict[str, int | float] = {}):
+def evaluate(
+    expression: Numerical,
+    substitutions: dict[str, int | float] = {},
+    error_on_invalid_snap: bool = False,
+):
     context = EvaluatorContext(
         expression,
         substitutions,
+        error_on_invalid_snap=error_on_invalid_snap,
     )
     # context.snap(f"Given the expression:\n$${render_latex(expression)}$$")
     new_expression = replace_symbols(expression, context)
