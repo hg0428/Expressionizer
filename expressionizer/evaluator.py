@@ -1396,7 +1396,7 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                         [arg for arg in subscript_arguments],
                         [arg for arg in superscript_arguments],
                     )
-                except ValueError as e:
+                except Exception as e:  # TODO more specific.
                     raise MathDomainError(
                         str(e),
                         FunctionCall(
