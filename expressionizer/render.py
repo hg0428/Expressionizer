@@ -140,6 +140,8 @@ def render_latex(
             if expression == math.pi:
                 return "\\pi"
             return str(expression)
+        case complex():
+            return f"({expression.real} + {expression.imag}i)"
         case Power(base, exponent) if (
             isinstance(expression.exponent, int)
             or isinstance(expression.exponent, float)
@@ -327,6 +329,8 @@ def render_type(expression: Numerical, indent=0):
             result = f"FunctionCall([\n{",\n".join([render_type(term, indent + 1) for term in expression.functional_arguments])}\n],\n[\n{",\n".join([render_type(term, indent + 1) for term in expression.subscript_arguments])}\n],\n[\n{",\n".join([render_type(term, indent + 1) for term in expression.superscript_arguments])}\n{indent_str}])"
         case Symbol():
             result = f'Symbol("{expression.name}")'
+        case complex():
+            result = f"complex({expression.real}, {expression.imag})"
         case _:
             result = "Unknown"
 

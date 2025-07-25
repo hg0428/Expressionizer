@@ -221,15 +221,15 @@ class EvaluatorContext:
         # print("New tree:", render_type(new_tree))
         # print("\n")
 
-        # for i, block in enumerate(self.blocks):
-        #     for j, tree in enumerate(block.trees):
+        for i, block in enumerate(self.blocks):
+            for j, tree in enumerate(block.trees):
 
-        #         block.trees[j] = replace_sub(tree, original, simplified)
-        #         print(
-        #             "block tree convert from to",
-        #             render_latex(tree),
-        #             render_latex(block.trees[j]),
-        #         )
+                block.trees[j] = replace_sub(tree, original, simplified)
+                # print(
+                #     "block tree convert from to",
+                #     render_latex(tree),
+                #     render_latex(block.trees[j]),
+                # )
 
         if explanation:
             snapshot.explanation = explanation.format(
@@ -754,7 +754,6 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
         b_approx = (
             round_sig(b_coefficient, context.options.max_precision) * 10**b_exponent
         )
-        print(b, a, b_approx, b_exponent, b_coefficient)
         if b != a:
             context.snap(
                 b,
@@ -923,8 +922,8 @@ def replace_sub(expr, target, replacement):
                 for factor in expr.factors:
                     if isinstance(factor, Product):
                         expr_factors.extend(factor.factors)
-                    elif isinstance(factor, Sum) and len(factor.terms) == 1:
-                        expr_factors.append(factor.terms[0])
+                    elif isinstance(factor, Sum) and len(factor.terms) <= 1:
+                        expr_factors.extend(factor.terms)
                     elif is_int_or_float(factor):
                         expr_sign *= 1 if factor >= 0 else -1
                         if abs(factor) != 1:
