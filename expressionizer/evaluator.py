@@ -196,7 +196,14 @@ class EvaluatorContext:
         if isinstance(original, str):
             # print(original)
             return self.snapshots.append(TextSnapshot(original, bool(simplified)))
-
+        if contains(self.current_tree, original) <= 0:
+            if self.error_on_invalid_snap:
+                raise ValueError(
+                    f"Original {render_latex(original)} not found in current tree {render_latex(self.current_tree)}.\n{render_type(self.original_tree)}"
+                )
+            else:
+                self.error_count += 1
+                return
         previous = self.current_tree
 
         new_tree = replace_sub(self.current_tree, original, simplified)
@@ -207,30 +214,22 @@ class EvaluatorContext:
         frame = inspect.currentframe().f_back
         line = frame.f_lineno
 
-        print(f"Called from line {line}.")
-        print("Old tree:", render_type(previous))
-        print("Original:", render_type(original))
-        print("Simplified:", render_type(simplified))
-        print("New tree:", render_type(new_tree))
-        print("\n")
-        if contains(self.current_tree, original) <= 0:
-            if self.error_on_invalid_snap:
-                raise ValueError(
-                    f"Original {render_latex(original)} not found in current tree {render_latex(self.current_tree)}.\n{render_type(self.original_tree)}"
-                )
-            else:
-                self.error_count += 1
-                return
+        # print(f"Called from line {line}.")
+        # print("Old tree:", render_type(previous))
+        # print("Original:", render_type(original))
+        # print("Simplified:", render_type(simplified))
+        # print("New tree:", render_type(new_tree))
+        # print("\n")
 
-        for i, block in enumerate(self.blocks):
-            for j, tree in enumerate(block.trees):
+        # for i, block in enumerate(self.blocks):
+        #     for j, tree in enumerate(block.trees):
 
-                block.trees[j] = replace_sub(tree, original, simplified)
-                print(
-                    "block tree convert from to",
-                    render_latex(tree),
-                    render_latex(block.trees[j]),
-                )
+        #         block.trees[j] = replace_sub(tree, original, simplified)
+        #         print(
+        #             "block tree convert from to",
+        #             render_latex(tree),
+        #             render_latex(block.trees[j]),
+        #         )
 
         if explanation:
             snapshot.explanation = explanation.format(
@@ -663,7 +662,6 @@ def add(a, b, context: EvaluatorContext):
 
 
 def multiply(a, b, context: EvaluatorContext, quick_compute=True):
-    print("multiply", a, b)
     limit = context.options.implicit_multiplication_limit
     a_coefficient, a_exponent = get_coefficient_exponent(a)
     b_coefficient, b_exponent = get_coefficient_exponent(b)
