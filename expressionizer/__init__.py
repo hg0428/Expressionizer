@@ -1,4 +1,4 @@
-__version__ = '0.6.4'
+__version__ = '0.6.7'
 
 from .expression import *
 from .evaluator import *

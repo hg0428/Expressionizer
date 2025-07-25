@@ -1,13 +1,37 @@
 import builtins
-from dataclasses import dataclass
+import inspect
 import math
 import sys
+from dataclasses import dataclass
+from decimal import Decimal
 from typing import Optional, Union
-from expressionizer import render
-import expressionizer.expression
-from expressionizer.expression import (
+
+from .expression import (
+    FunctionCall,
     Numerical,
     Power,
+    Product,
+    Sum,
+    Symbol,
+    is_int_or_float,
+    numerical_sort_key,
+    numerical_sort_key_reverse,
+    power,
+    product,
+    sum,
+)
+from .render import render_latex, render_type
+
+
+class MathDomainError(ValueError):
+    """Custom exception for math domain errors that stores the problematic expression."""
+
+    def __init__(self, message, expression):
+        super().__init__(message)
+        self.expression = expression
+
+
+from expressionizer.expression import (
     Product,
     Sum,
     Symbol,
@@ -21,6 +45,12 @@ from expressionizer.expression import (
 )
 from expressionizer.render import render_latex, render_type
 from decimal import Decimal
+import inspect
+
+
+def get_caller_line():
+
+    return frame.f_lineno, frame.f_code.co_filename
 
 
 def round_sig(x, sig=2):
@@ -45,13 +75,23 @@ class Snapshot:
     previous_tree: Numerical
     full_tree: Numerical
     explanation: Optional[str]
+    approximate: bool = False
 
-    def __init__(self, original, portion, previous_tree, full_tree, explanation=None):
+    def __init__(
+        self,
+        original,
+        portion,
+        previous_tree,
+        full_tree,
+        explanation=None,
+        approximate=False,
+    ):
         self.original = original
         self.portion = portion
         self.previous_tree = previous_tree
         self.full_tree = full_tree
         self.explanation = explanation
+        self.approximate = approximate
 
     def __eq__(self, other):
         if isinstance(other, Snapshot):
@@ -83,6 +123,39 @@ class TextSnapshot:
         return self.text
 
 
+class BlockContext:
+    trees: list[Numerical]
+    context: "EvaluatorContext"
+
+    def __init__(self, trees: list[Numerical], context: "EvaluatorContext"):
+        self.trees = trees
+        self.context = context
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.context.blocks.remove(self)
+
+    def __iter__(self):
+        return iter(self.trees)
+
+    def __len__(self):
+        return len(self.trees)
+
+    def __getitem__(self, index):
+        return self.trees[index]
+
+    def __setitem__(self, index, value):
+        self.trees[index] = value
+
+    def __delitem__(self, index):
+        del self.trees[index]
+
+    def __contains__(self, item):
+        return item in self.trees
+
+
 class EvaluatorContext:
     substitutions: dict[str, int | float]
     steps: list[str]
@@ -91,6 +164,8 @@ class EvaluatorContext:
     options: EvaluatorOptions
     error_on_invalid_snap: bool
     error_count: int
+    is_approximate: bool
+    blocks: list[BlockContext]
 
     def __init__(
         self,
@@ -101,23 +176,43 @@ class EvaluatorContext:
     ):
         self.substitutions = substitutions
         self.snapshots = [Snapshot(tree, tree, tree, tree)]
+        self.blocks = []
         self.current_tree = tree
         self.original_tree = tree
         self.options = options
         self.error_on_invalid_snap = error_on_invalid_snap
         self.error_count = 0
+        self.is_approximate = False
 
     def snap(
         self,
         original: Union[Numerical, str],
         simplified: Union[Numerical, bool] = None,
         explanation: Optional[str] = None,
+        approximate=False,
     ):
-        # print()
+        if approximate:
+            self.is_approximate = True
         if isinstance(original, str):
             # print(original)
             return self.snapshots.append(TextSnapshot(original, bool(simplified)))
 
+        previous = self.current_tree
+
+        new_tree = replace_sub(self.current_tree, original, simplified)
+
+        snapshot = Snapshot(
+            original, simplified, previous, new_tree, approximate=approximate
+        )
+        frame = inspect.currentframe().f_back
+        line = frame.f_lineno
+
+        print(f"Called from line {line}.")
+        print("Old tree:", render_type(previous))
+        print("Original:", render_type(original))
+        print("Simplified:", render_type(simplified))
+        print("New tree:", render_type(new_tree))
+        print("\n")
         if contains(self.current_tree, original) <= 0:
             if self.error_on_invalid_snap:
                 raise ValueError(
@@ -125,16 +220,17 @@ class EvaluatorContext:
                 )
             else:
                 self.error_count += 1
-        previous = self.current_tree
+                return
 
-        new_tree = replace_sub(self.current_tree, original, simplified)
+        for i, block in enumerate(self.blocks):
+            for j, tree in enumerate(block.trees):
 
-        snapshot = Snapshot(original, simplified, previous, new_tree)
-        # print("Old tree:", render_type(previous))
-        # print("Original:", render_type(original))
-        # print("Simplified:", render_type(simplified))
-        # print("New tree:", render_type(new_tree))
-        # print("\n")
+                block.trees[j] = replace_sub(tree, original, simplified)
+                print(
+                    "block tree convert from to",
+                    render_latex(tree),
+                    render_latex(block.trees[j]),
+                )
 
         if explanation:
             snapshot.explanation = explanation.format(
@@ -294,6 +390,10 @@ class EvaluatorContext:
             for substep in step:
                 text += substep + "\n"
         return text
+
+    def block(self, trees: list[Numerical]):
+        self.blocks.append(BlockContext(trees, self))
+        return self.blocks[-1]
 
 
 def pad(iterable, size, value=None, side="left"):
@@ -530,7 +630,6 @@ def solve_sum(components, context: EvaluatorContext):
 
     # Convert for return (keep int for old path)
     result = float(result_str) if "." in result_str else int(result_str)
-    print(result, carry)
     if carry < 0:
         result = -(-carry * 10 ** (p + 1) - result)
     context.snap(f"Putting it together, we get ${result}$.", False)
@@ -564,6 +663,7 @@ def add(a, b, context: EvaluatorContext):
 
 
 def multiply(a, b, context: EvaluatorContext, quick_compute=True):
+    print("multiply", a, b)
     limit = context.options.implicit_multiplication_limit
     a_coefficient, a_exponent = get_coefficient_exponent(a)
     b_coefficient, b_exponent = get_coefficient_exponent(b)
@@ -648,6 +748,7 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
             a,
             a_approx,
             f"${a}$ has too many decimal places. Let's approximate it to {a_approx} to make the multiplication easier.",
+            approximate=True,
         )
     else:
         a_approx = a
@@ -655,6 +756,7 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
         b_approx = (
             round_sig(b_coefficient, context.options.max_precision) * 10**b_exponent
         )
+        print(b, a, b_approx, b_exponent, b_coefficient)
         if b != a:
             context.snap(
                 b,
@@ -664,6 +766,7 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
                     if b != a
                     else None
                 ),
+                approximate=True,
             )
     else:
         b_approx = b
@@ -801,6 +904,8 @@ def replace_sub(expr, target, replacement):
     """
     if expr == target:
         return replacement
+    elif expr == -target:
+        return -replacement
     match expr:
         case Power():
             return Power(
@@ -933,6 +1038,8 @@ def contains(expr, target):
     """
     if expr == target:
         return 1
+    elif expr == -target:
+        return 1
     match expr:
         case Power():
             return contains(expr.base, target) or contains(expr.exponent, target)
@@ -1025,27 +1132,78 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
         case int() | float():
             result = expression
         case Power():
-            base = evaluate_expression(expression.base, context)
-            exponent_fraction = get_fraction(expression.exponent)
+            with context.block([expression.exponent]) as block:
+                base = evaluate_expression(expression.base, context)
+                exponent = block[0]
+            exponent_fraction = get_fraction(exponent)
             if exponent_fraction and exponent_fraction[0] == 1:
-                exponent = evaluate_expression(
-                    expression.exponent,
-                    EvaluatorContext(expression.exponent),
+                new_exponent = evaluate_expression(
+                    exponent,
+                    EvaluatorContext(exponent),
                 )  # Fake context so we don't get intermediate steps on roots.
-                result = base**exponent
+                result = base**new_exponent
                 context.snap(
-                    Power(base, expression.exponent),
+                    Power(base, exponent),
                     result,
                 )
                 return result
             else:
-                exponent = evaluate_expression(expression.exponent, context)
+                exponent = evaluate_expression(exponent, context)
             expression = Power(base, exponent)
+            if base in [0, 1]:
+                result = base
+                context.snap(expression, result, f"{base} to any power is {base}.")
+                return result
+            if base == -1 and is_int_or_float(exponent) and exponent.is_integer():
+                # Determine sign
+                if exponent % 2 == 0:
+                    result = 1
+                else:
+                    result = -1
+                context.snap(
+                    expression,
+                    result,
+                    f"When $-1$ is raised to an even power, the result is $1$. When $-1$ is raised to an odd power, the result is $-1$. "
+                    + (
+                        f"Since in this case, our power is {exponent}, which is even, the result is $1$."
+                        if exponent % 2 == 0
+                        else f"Since in this case, our power is {exponent}, which is odd, the result is $-1$."
+                    ),
+                )
+                return result
+
             if is_int_or_float(base) and is_int_or_float(exponent):
-                if (
-                    exponent > context.options.max_exponent
-                    or exponent < -context.options.max_exponent
-                ):
+                if exponent > context.options.max_exponent and base > 1:
+                    context.snap(
+                        expression,
+                        float("inf"),
+                        explanation="${previous}$ is too large to compute, so let's call it $\\infty$.",
+                        approximate=True,
+                    )
+                    return float("inf")  # Infinity, too large to compute
+                elif exponent < -context.options.max_exponent and base > 1:
+                    context.snap(
+                        expression,
+                        0,
+                        explanation="${previous}$ is too small to compute, so let's call it $0$.",
+                        approximate=True,
+                    )
+                    return float("-inf")  # Infinity, too large to compute
+                elif exponent > context.options.max_exponent and base < 1:
+                    context.snap(
+                        expression,
+                        0,
+                        explanation="${previous}$ is too small to compute, so let's call it $0$.",
+                        approximate=True,
+                    )
+                    return 0
+                elif exponent < -context.options.max_exponent and base < 1:
+                    context.snap(
+                        expression,
+                        float("inf"),
+                        explanation="${previous}$ is too large to compute, so let's call it $\\infty$.",
+                        approximate=True,
+                    )
                     return float("inf")  # Infinity, too large to compute
                 if context.options.expand_powers and exponent > 1:
                     new_expression = Product(
@@ -1078,12 +1236,19 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                 context.snap(expression, 0)
                 return 0
             factors = [
-                evaluate_expression(factor, context) for factor in expression.factors
+                evaluate_expression(factor, context)
+                for factor in expression.factors
+                if factor != 1
             ]
             current_expression = Product(factors)
             if len(factors) == 1:
                 context.snap(current_expression, factors[0])
                 return factors[0]
+            if len(factors) == 0:
+                context.snap(current_expression, 1)
+                return 1
+            if len(factors) != len(expression.factors):
+                context.snap(expression, current_expression)
             elif 0 in factors:
                 context.snap(current_expression, 0)
                 return 0
@@ -1115,9 +1280,13 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                 # Original logic if no distribution is needed
                 factors = sorted(factors, key=numerical_sort_key)
                 if all(is_int_or_float(factor) for factor in factors):
-                    result = factors[0]
-                    for factor in factors[1:]:
-                        result = multiply(result, factor, context)
+                    with context.block(factors) as block:
+                        result = block[0]
+                        i = 1
+                        while i < len(block):
+                            factor = block[i]
+                            result = multiply(result, factor, context)
+                            i += 1
                 else:
                     new_expression = product([arg for arg in factors])
                     context.snap(current_expression, new_expression)
@@ -1148,11 +1317,14 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
             variable_terms = [t for t in terms if not is_int_or_float(t)]
             if len(numeric_terms) > 1:
                 numeric_sum = numeric_terms[0]
-                for term in numeric_terms[1:]:
-                    numeric_sum = add(numeric_sum, term, context)
+                with context.block(numeric_terms) as block:
+                    i = 1
+                    while i < len(block):
+                        term = block[i]
+                        numeric_sum = add(numeric_sum, term, context)
+                        i += 1
                 new_terms = [numeric_sum] + variable_terms
                 new_sum = Sum(new_terms)
-                context.snap(expression, new_sum)
                 expression = new_sum
                 terms = new_terms
                 numeric_terms = [numeric_sum]
@@ -1198,34 +1370,63 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
 
         case FunctionCall():
             state = context.save_state()
-            functional_arguments = [
-                evaluate_expression(arg, context)
-                for arg in expression.functional_arguments
-            ]
-            subscript_arguments = [
-                evaluate_expression(arg, context)
-                for arg in expression.subscript_arguments
-            ]
-            superscript_arguments = [
-                evaluate_expression(arg, context)
-                for arg in expression.superscript_arguments
-            ]
-            if expression.function in context.substitutions and all(
-                is_int_or_float(arg) for arg in functional_arguments
+            with context.block(
+                expression.functional_arguments
+            ) as functional_arguments, context.block(
+                expression.subscript_arguments
+            ) as subscript_arguments, context.block(
+                expression.superscript_arguments
+            ) as superscript_arguments:
+                functional_arguments = [
+                    evaluate_expression(arg, context) for arg in functional_arguments
+                ]
+                subscript_arguments = [
+                    evaluate_expression(arg, context) for arg in subscript_arguments
+                ]
+                superscript_arguments = [
+                    evaluate_expression(arg, context) for arg in superscript_arguments
+                ]
+            if (
+                expression.function in context.substitutions
+                and all(is_int_or_float(arg) for arg in functional_arguments)
+                and all(is_int_or_float(arg) for arg in subscript_arguments)
+                and all(is_int_or_float(arg) for arg in superscript_arguments)
             ):
-                result = context.substitutions[expression.function](
-                    [arg for arg in functional_arguments],
-                    [arg for arg in subscript_arguments],
-                    [arg for arg in superscript_arguments],
-                )
+                try:
+                    result = context.substitutions[expression.function](
+                        [arg for arg in functional_arguments],
+                        [arg for arg in subscript_arguments],
+                        [arg for arg in superscript_arguments],
+                    )
+                except ValueError as e:
+                    raise MathDomainError(
+                        str(e),
+                        FunctionCall(
+                            expression.function,
+                            functional_arguments,
+                            subscript_arguments,
+                            superscript_arguments,
+                        ),
+                    )
             elif expression.function.name in context.substitutions and all(
                 is_int_or_float(arg) for arg in functional_arguments
             ):
-                result = context.substitutions[expression.function.name](
-                    [arg for arg in functional_arguments],
-                    [arg for arg in subscript_arguments],
-                    [arg for arg in superscript_arguments],
-                )
+                try:
+                    result = context.substitutions[expression.function.name](
+                        [arg for arg in functional_arguments],
+                        [arg for arg in subscript_arguments],
+                        [arg for arg in superscript_arguments],
+                    )
+                except ValueError as e:
+                    raise MathDomainError(
+                        str(e),
+                        FunctionCall(
+                            expression.function,
+                            functional_arguments,
+                            subscript_arguments,
+                            superscript_arguments,
+                        ),
+                    )
             else:
                 result = FunctionCall(
                     expression.function,
@@ -1245,7 +1446,7 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
 def evaluate(
     expression: Numerical,
     substitutions: dict[str, int | float] = {},
-    error_on_invalid_snap: bool = False,
+    error_on_invalid_snap: bool = True,
 ):
     context = EvaluatorContext(
         expression,
@@ -1279,12 +1480,15 @@ def evaluate(
         )
     else:
         context.snap(expression, new_expression)
-    # try:
-    result = evaluate_expression(new_expression, context)
-    if isinstance(result, float) and result.is_integer():
-        result = int(result)
+    try:
+        result = evaluate_expression(new_expression, context)
+        if isinstance(result, float) and result.is_integer():
+            result = int(result)
+    except MathDomainError as e:
+        # The evaluation failed. The 'result' is the expression before the error.
+        result = new_expression
+        # Add a final step explaining the domain error.
+        error_message = f"We cannot simplify the expression any further because ${render_latex(e.expression)}$ is undefined. Those values are out of domain for {e.expression.function.name}."
+        context.snap(error_message)
 
     return result, context
-    # except Exception as e:
-    #     print(e)
-    #     return None, context

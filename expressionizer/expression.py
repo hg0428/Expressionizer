@@ -447,6 +447,12 @@ class Product:
                 if self_factors[i] != other_factors[i]:
                     return False
             return True
+        elif (
+            len(self.factors) == 1
+            and is_int_or_float(other)
+            and self.factors[0] == other
+        ):
+            return True
         return False
 
     def __ne__(self, other: Numerical):
@@ -578,6 +584,8 @@ class Sum:
             for i in range(len(self.terms)):
                 if self.terms[i] != other.terms[i]:
                     return False
+            return True
+        elif len(self.terms) == 1 and is_int_or_float(other) and self.terms[0] == other:
             return True
         return False
 

@@ -158,14 +158,29 @@ def build_weighted_pool(taken: set[str]) -> list[tuple[str, float]]:
 
 
 # Main function
-def random_variable_name(taken: set[str]) -> str:
+def random_variable_name(
+    taken: set[str], allow_subscript_superscript: bool = True
+) -> str:
     pool = build_weighted_pool(taken)
     if not pool:
         raise ValueError("No available variable names not already taken.")
     variables, weights = zip(*pool)
     total = sum(weights)
     normalized_weights = [w / total for w in weights]
-    return random.choices(variables, weights=normalized_weights, k=1)[0]
+    variable_name = random.choices(variables, weights=normalized_weights, k=1)[0]
+    if random.random() < 0.1 and not variable_name in taken:
+        variable_name = variable_name.upper()
+    if random.random() < 0.05:
+        variable_name = (
+            f"{variable_name}_{random_variable_name({*taken, variable_name}, False)}"
+        )
+    if random.random() < 0.01:
+        variable_name = (
+            f"{variable_name}^{random_variable_name({*taken, variable_name}, False)}"
+        )
+    if variable_name in taken:
+        return random_variable_name(taken)
+    return variable_name
 
 
 def generate_number(
@@ -326,27 +341,27 @@ FUNCTIONS = {
         int(args[0]), int(args[1])
     ),
     # Statistical Functions
-    MathFunction(
-        "mean", functional_parameters=20, functional_min_parameters=1
-    ): lambda args, _, __: statistics.mean(args),
-    MathFunction(
-        "median", functional_parameters=20, functional_min_parameters=1
-    ): lambda args, _, __: statistics.median(args),
-    MathFunction(
-        "mode", functional_parameters=20, functional_min_parameters=1
-    ): lambda args, _, __: statistics.mode(args),
-    MathFunction(
-        "stdev", functional_parameters=20, functional_min_parameters=2
-    ): lambda args, _, __: statistics.stdev(args),
-    MathFunction(
-        "variance", functional_parameters=20, functional_min_parameters=2
-    ): lambda args, _, __: statistics.variance(args),
-    MathFunction(
-        "min", functional_parameters=20, functional_min_parameters=1
-    ): lambda args, _, __: min(args),
-    MathFunction(
-        "max", functional_parameters=20, functional_min_parameters=1
-    ): lambda args, _, __: max(args),
+    # MathFunction(
+    #     "mean", functional_parameters=20, functional_min_parameters=1
+    # ): lambda args, _, __: statistics.mean(args),
+    # MathFunction(
+    #     "median", functional_parameters=20, functional_min_parameters=1
+    # ): lambda args, _, __: statistics.median(args),
+    # MathFunction(
+    #     "mode", functional_parameters=20, functional_min_parameters=1
+    # ): lambda args, _, __: statistics.mode(args),
+    # MathFunction(
+    #     "stdev", functional_parameters=20, functional_min_parameters=2
+    # ): lambda args, _, __: statistics.stdev(args),
+    # MathFunction(
+    #     "variance", functional_parameters=20, functional_min_parameters=2
+    # ): lambda args, _, __: statistics.variance(args),
+    # MathFunction(
+    #     "min", functional_parameters=20, functional_min_parameters=1
+    # ): lambda args, _, __: min(args),
+    # MathFunction(
+    #     "max", functional_parameters=20, functional_min_parameters=1
+    # ): lambda args, _, __: max(args),
     # Special Functions
     MathFunction("gamma", functional_parameters=1): lambda args, _, __: math.gamma(
         args[0]
@@ -394,7 +409,7 @@ def generate_random_expression(
         else:
             variable_name = random.choice(list(context.taken))
         context.taken.add(variable_name)
-        if random.random() < 0.7:  # 70% chance to generate a substitution
+        if random.random() < 0.8:  # 80% chance to generate a substitution
             context.substitutions[variable_name] = generate_number(
                 mean=mean,
                 std=std,
@@ -505,18 +520,18 @@ def generate_random_expression(
 if __name__ == "__main__":
     # for i in range(100):
     #     print(generate_number())
-    for i in range(2000):
-        try:
-            print("\n")
-            expression_context = ExpressionContext()
-            expression = generate_random_expression()
-            print("Expression: $", render_latex(expression), "$")
-            print(render_type(expression))
-            substitutions = expression_context.substitutions
-            substitutions.update(FUNCTIONS)
-            answer, context = evaluate(expression, substitutions)
-            text = context.render()
-            print(text)
-            print(f"Final answer: $\\boxed{{{render_latex(answer)}}}$")
-        except Exception as e:
-            pass
+    for i in range(100):
+        # try:
+        print("\n")
+        expression_context = ExpressionContext()
+        expression = generate_random_expression(2)
+        print("Expression: $", render_latex(expression), "$")
+        print(render_type(expression))
+        substitutions = expression_context.substitutions
+        substitutions.update(FUNCTIONS)
+        answer, context = evaluate(expression, substitutions)
+        text = context.render()
+        print(text)
+        print(f"Final answer: $\\boxed{{{render_latex(answer)}}}$")
+    # except Exception as e:
+    #     pass

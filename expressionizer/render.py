@@ -327,6 +327,8 @@ def render_type(expression: Numerical, indent=0):
             result = f"FunctionCall([\n{",\n".join([render_type(term, indent + 1) for term in expression.functional_arguments])}\n],\n[\n{",\n".join([render_type(term, indent + 1) for term in expression.subscript_arguments])}\n],\n[\n{",\n".join([render_type(term, indent + 1) for term in expression.superscript_arguments])}\n{indent_str}])"
         case Symbol():
             result = f'Symbol("{expression.name}")'
+        case _:
+            result = "Unknown"
 
     return (indent_str + result).replace("\n", "")
 
