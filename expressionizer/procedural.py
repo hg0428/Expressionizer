@@ -395,6 +395,7 @@ def generate_random_expression(
     allow_negative=True,
     allow_zero=True,
     require_integer=False,
+    allow_functions=True,
     context: ExpressionContext = ExpressionContext(),
 ):
     """
@@ -460,6 +461,9 @@ def generate_random_expression(
     # Decide the type of expression to generate
     choices = ["sum", "product", "power", "function"]
     weights = [4, 3, 1, 0.5]  # Adjust weights as needed
+    if not allow_functions:
+        choices.remove("function")
+        weights = weights[:-1]
     expr_type = random.choices(choices, weights=weights, k=1)[0]
 
     if expr_type == "sum":
