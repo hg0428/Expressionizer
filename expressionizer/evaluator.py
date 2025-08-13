@@ -67,6 +67,8 @@ class EvaluatorOptions:
     expand_powers: bool = True
     max_precision: int = 5
     max_exponent: int = 100
+    min_value: float = 1e-6
+    max_value: float = 1e6
 
 
 class Snapshot:
@@ -1127,7 +1129,14 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
     result = None
     match expression:
         case int() | float():
-            result = expression
+            if abs(expression) < context.options.min_value:
+                result = 0
+            elif expression > context.options.max_value:
+                result = float("inf")
+            elif expression < -context.options.min_value:
+                result = float("-inf")
+            else:
+                result = expression
         case Power():
             with context.block([expression.exponent]) as block:
                 base = evaluate_expression(expression.base, context)
