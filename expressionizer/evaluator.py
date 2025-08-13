@@ -1137,6 +1137,9 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                 result = float("-inf")
             else:
                 result = expression
+
+            if result != expression:
+                context.snap(expression, result)
         case Power():
             with context.block([expression.exponent]) as block:
                 base = evaluate_expression(expression.base, context)
