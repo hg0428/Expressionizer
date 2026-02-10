@@ -5,6 +5,7 @@ expressionizer/__init__.py
 expressionizer/equation_generation.py
 expressionizer/evaluator.py
 expressionizer/expression.py
+expressionizer/number_format.py
 expressionizer/procedural.py
 expressionizer/render.py
 expressionizer/solve_equation.py
