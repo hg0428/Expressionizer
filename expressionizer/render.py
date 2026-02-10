@@ -56,8 +56,10 @@ def render(expression: Union[Numerical, Equation, InEquality], group=False):
             else:
                 return output
         case Power(value, Power(base, exponent)) if (
-            isinstance(exponent, int) or isinstance(exponent, float)
-        ) and exponent < 0:
+            (isinstance(exponent, int) or isinstance(exponent, float))
+            and isinstance(base, (int, float))
+            and exponent < 0
+        ):
             # Root
             root = base ** (-exponent)
             if root == 2:
@@ -121,6 +123,23 @@ def render(expression: Union[Numerical, Equation, InEquality], group=False):
                 )
 
             return f"{expression.function.name}{subscript}{superscript}({', '.join(map(repr, expression.functional_arguments))})"
+        case Derivative():
+            parts = []
+            for variable, order in expression.variables:
+                if order == 1:
+                    parts.append(render(variable))
+                else:
+                    parts.append(f"{render(variable)}^{order}")
+            return f"d/d{','.join(parts)}({render(expression.expression)})"
+        case Integral():
+            if expression.lower is None or expression.upper is None:
+                return (
+                    f"int({render(expression.expression)}) d{render(expression.variable)}"
+                )
+            return (
+                f"int_[{render(expression.lower)}..{render(expression.upper)}]"
+                + f"({render(expression.expression)}) d{render(expression.variable)}"
+            )
         case Symbol():
             return expression.name
         case Equation():
@@ -136,6 +155,10 @@ def render_latex(
     square_group=False,
     curly_group=False,
 ):
+    def _render_or_fallback(term):
+        rendered = render_latex(term, renderOptions)
+        return rendered if rendered is not None else str(term)
+
     match expression:
         case int() | float():
             if expression == math.pi:
@@ -162,8 +185,10 @@ def render_latex(
                     curly_group,
                 )
         case Power(value, Power(base, exponent)) if (
-            isinstance(exponent, int) or isinstance(exponent, float)
-        ) and exponent < 0:
+            (isinstance(exponent, int) or isinstance(exponent, float))
+            and isinstance(base, (int, float))
+            and exponent < 0
+        ):
             # Root
             root = base ** (-exponent)
             if root == 2:
@@ -248,21 +273,14 @@ def render_latex(
         case Sum():
             if len(expression.terms) > 1:
                 return apply_group(
-                    " + ".join(
-                        map(
-                            lambda term: render_latex(term, renderOptions),
-                            expression.terms,
-                        )
-                    ),
+                    " + ".join(_render_or_fallback(term) for term in expression.terms),
                     paren_group,
                     square_group,
                     curly_group,
                 )
             else:
                 return " + ".join(
-                    map(
-                        lambda term: render_latex(term, renderOptions), expression.terms
-                    )
+                    _render_or_fallback(term) for term in expression.terms
                 )
         case FunctionCall():
             if len(expression.subscript_arguments) == 0:
@@ -302,6 +320,39 @@ def render_latex(
             if renderOptions.backslash_function_call:
                 output = "\\" + output
             return output
+        case Derivative():
+            total_order = sum(order for _, order in expression.variables)
+            den = " ".join(
+                [
+                    (
+                        f"d{render_latex(variable, renderOptions)}"
+                        if order == 1
+                        else f"d{render_latex(variable, renderOptions)}^{{{order}}}"
+                    )
+                    for variable, order in expression.variables
+                ]
+            )
+            if total_order == 1:
+                num = "d"
+            else:
+                num = f"d^{{{total_order}}}"
+            body = render_latex(expression.expression, renderOptions)
+            return apply_group(
+                f"\\frac{{{num}}}{{{den}}}{body}",
+                paren_group,
+                square_group,
+                curly_group,
+            )
+        case Integral():
+            integrand = render_latex(expression.expression, renderOptions)
+            variable = render_latex(expression.variable, renderOptions)
+            if expression.lower is None or expression.upper is None:
+                output = f"\\int {integrand} \\, d{variable}"
+            else:
+                lower = render_latex(expression.lower, renderOptions)
+                upper = render_latex(expression.upper, renderOptions)
+                output = f"\\int_{{{lower}}}^{{{upper}}} {integrand} \\, d{variable}"
+            return apply_group(output, paren_group, square_group, curly_group)
         case Symbol():
             return expression.name
         case Equation():
@@ -313,6 +364,13 @@ def render_latex(
             )
         case InEquality():
             return f"{render_latex(expression.expression1, renderOptions)} {expression.sign} {render_latex(expression.expression2, renderOptions)}"
+        case _:
+            return apply_group(
+                str(expression),
+                paren_group,
+                square_group,
+                curly_group,
+            )
 
 
 def render_type(expression: Numerical, indent=0):
@@ -328,6 +386,26 @@ def render_type(expression: Numerical, indent=0):
             result = f"Sum([\n{",\n".join([render_type(term, indent + 1) for term in expression.terms])}\n{indent_str}])"
         case FunctionCall():
             result = f"FunctionCall([\n{",\n".join([render_type(term, indent + 1) for term in expression.functional_arguments])}\n],\n[\n{",\n".join([render_type(term, indent + 1) for term in expression.subscript_arguments])}\n],\n[\n{",\n".join([render_type(term, indent + 1) for term in expression.superscript_arguments])}\n{indent_str}])"
+        case Derivative():
+            parts = ", ".join([f"({render_type(v)}, {o})" for v, o in expression.variables])
+            result = (
+                f"Derivative({render_type(expression.expression, indent + 1)}, [{parts}])"
+            )
+        case Integral():
+            lower = (
+                render_type(expression.lower, indent + 1)
+                if expression.lower is not None
+                else "None"
+            )
+            upper = (
+                render_type(expression.upper, indent + 1)
+                if expression.upper is not None
+                else "None"
+            )
+            result = (
+                f"Integral({render_type(expression.expression, indent + 1)}, "
+                + f"{render_type(expression.variable, indent + 1)}, {lower}, {upper})"
+            )
         case Symbol():
             result = f'Symbol("{expression.name}")'
         case complex():

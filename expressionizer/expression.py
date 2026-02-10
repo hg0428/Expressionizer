@@ -5,6 +5,16 @@ from typing import *
 from collections import Counter
 
 
+def _clean_numeric(value):
+    if isinstance(value, float):
+        value = float(format(value, ".15g"))
+        if value == 0:
+            return 0
+        if value.is_integer():
+            return int(value)
+    return value
+
+
 def numerical_sort_key(numerical: Numerical):
     if is_int_or_float(numerical):
         return (0, -numerical)  # 0 means number, -x for descending order
@@ -373,6 +383,105 @@ class FunctionCall:
         return total
 
 
+class Derivative:
+    __match_args__ = ("expression", "variables")
+    expression: Numerical
+    variables: list[tuple[Symbol, int]]
+
+    def __init__(self, expression: Numerical, variables: list[tuple[Symbol, int]]):
+        self.expression = expression
+        self.variables = variables
+
+    def __str__(self):
+        pieces = []
+        for variable, order in self.variables:
+            if order == 1:
+                pieces.append(str(variable))
+            else:
+                pieces.append(f"{variable}^{order}")
+        return f"d/d{','.join(pieces)}({self.expression})"
+
+    def __repr__(self):
+        return str(self)
+
+    def __hash__(self):
+        return hash((self.expression, tuple(self.variables)))
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, Derivative)
+            and self.expression == other.expression
+            and self.variables == other.variables
+        )
+
+    def __bool__(self):
+        return True
+
+    def __len__(self):
+        total = 1 if is_int_or_float(self.expression) else len(self.expression)
+        for variable, _ in self.variables:
+            total += 1 if is_int_or_float(variable) else len(variable)
+        return total
+
+    def __neg__(self):
+        return Product([-1, self])
+
+
+class Integral:
+    __match_args__ = ("expression", "variable", "lower", "upper")
+    expression: Numerical
+    variable: Symbol
+    lower: Optional[Numerical]
+    upper: Optional[Numerical]
+
+    def __init__(
+        self,
+        expression: Numerical,
+        variable: Symbol,
+        lower: Optional[Numerical] = None,
+        upper: Optional[Numerical] = None,
+    ):
+        self.expression = expression
+        self.variable = variable
+        self.lower = lower
+        self.upper = upper
+
+    def __str__(self):
+        if self.lower is None or self.upper is None:
+            return f"∫({self.expression})d{self.variable}"
+        return f"∫_{{{self.lower}}}^{{{self.upper}}}({self.expression})d{self.variable}"
+
+    def __repr__(self):
+        return str(self)
+
+    def __hash__(self):
+        return hash((self.expression, self.variable, self.lower, self.upper))
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, Integral)
+            and self.expression == other.expression
+            and self.variable == other.variable
+            and self.lower == other.lower
+            and self.upper == other.upper
+        )
+
+    def __bool__(self):
+        return True
+
+    def __len__(self):
+        total = 1 if is_int_or_float(self.expression) else len(self.expression)
+        total += 1 if is_int_or_float(self.variable) else len(self.variable)
+        if self.lower is not None:
+            total += 1 if is_int_or_float(self.lower) else len(self.lower)
+        if self.upper is not None:
+            total += 1 if is_int_or_float(self.upper) else len(self.upper)
+        return total
+
+    def __neg__(self):
+        return Product([-1, self])
+
+
 class Product:
     __match_args__ = ("factors",)
     factors: list[Numerical]
@@ -619,7 +728,7 @@ class Sum:
                     and len(term.factors) == 2
                     and -1 in term.factors
                 ):
-                    other_terms.append(term.factors[0] * term.factors[1])
+                    other_terms.append(product([term.factors[0], term.factors[1]]))
                 else:
                     other_terms.append(term)
             self_terms = []
@@ -633,7 +742,7 @@ class Sum:
                     and len(term.factors) == 2
                     and -1 in term.factors
                 ):
-                    self_terms.append(term.factors[0] * term.factors[1])
+                    self_terms.append(product([term.factors[0], term.factors[1]]))
                 else:
                     self_terms.append(term)
             c1, c2 = Counter(other_terms), Counter(self_terms)
@@ -650,7 +759,7 @@ class Sum:
         return total
 
 
-Numerical = int | float | Power | Product | Sum | FunctionCall | Symbol
+Numerical = int | float | Power | Product | Sum | FunctionCall | Derivative | Integral | Symbol
 
 
 class Equation:
@@ -708,6 +817,9 @@ def symbol(name: str):
 
 def power(base: Numerical, exponent: Numerical = 1):
     if exponent == 0:
+        if base == 0:
+            # Keep 0^0 explicit so evaluator can handle domain behavior consistently.
+            return Power(base, exponent)
         return 1
     elif exponent == 1:
         return base
@@ -724,6 +836,7 @@ def product(factors: list[Numerical]):
         match factor:
             case int() | float():
                 coefficient *= factor
+                coefficient = _clean_numeric(coefficient)
                 if coefficient == 0:
                     return 0
             case Product():
@@ -736,6 +849,11 @@ def product(factors: list[Numerical]):
     function_calls = {}
     for factor in expanded_factors:
         match factor:
+            case int() | float():
+                coefficient *= factor
+                coefficient = _clean_numeric(coefficient)
+                if coefficient == 0:
+                    return 0
             case Symbol():
                 if factor in powers:
                     powers[factor] += 1
@@ -757,6 +875,7 @@ def product(factors: list[Numerical]):
                 else:
                     function_calls[factor] = 1
 
+    coefficient = _clean_numeric(coefficient)
     if len(powers) + len(sums) + len(function_calls) == 0:
         return coefficient
     new_factors = [coefficient] if coefficient != 1 else []
@@ -781,13 +900,14 @@ def sum(terms: list[Numerical] | Sum):
         match term:
             case int() | float():
                 numerical += term
+                numerical = _clean_numeric(numerical)
             case Sum():
                 expanded_terms.extend(term.terms)
             case _:
                 expanded_terms.append(term)
 
     if len(expanded_terms) == 0:
-        return numerical
+        return _clean_numeric(numerical)
 
     terms_count = {}
     for term in expanded_terms:
@@ -796,18 +916,70 @@ def sum(terms: list[Numerical] | Sum):
         else:
             terms_count[term] = 1
 
+    numerical = _clean_numeric(numerical)
     new_terms = [numerical] if numerical != 0 else []
     for term, count in terms_count.items():
         if count == 1:
             new_terms.append(term)
         else:
-            new_terms.append(product(term, count))
+            new_terms.append(product([term] * count))
 
     return Sum(new_terms)
 
 
 def fraction(numerator: Numerical, denominator: Numerical):
     return product([numerator, power(denominator, -1)])
+
+
+def _normalize_derivative_variables(
+    variable: Symbol | str | tuple[Symbol | str, int] | list[tuple[Symbol | str, int]],
+    order: int = 1,
+) -> list[tuple[Symbol, int]]:
+    if isinstance(variable, list):
+        items = variable
+    elif isinstance(variable, tuple):
+        items = [variable]
+    else:
+        items = [(variable, order)]
+
+    normalized = []
+    for var, ord_value in items:
+        if isinstance(var, str):
+            var = Symbol(var)
+        if not isinstance(var, Symbol):
+            raise TypeError("Derivative variables must be Symbol or str.")
+        if ord_value < 1:
+            raise ValueError("Derivative order must be >= 1.")
+        normalized.append((var, int(ord_value)))
+    return normalized
+
+
+def derivative(
+    expression: Numerical,
+    variable: Symbol | str | tuple[Symbol | str, int] | list[tuple[Symbol | str, int]],
+    order: int = 1,
+):
+    return Derivative(expression, _normalize_derivative_variables(variable, order))
+
+
+def partial_derivative(
+    expression: Numerical,
+    variables: list[tuple[Symbol | str, int]],
+):
+    return Derivative(expression, _normalize_derivative_variables(variables))
+
+
+def integral(
+    expression: Numerical,
+    variable: Symbol | str,
+    lower: Optional[Numerical] = None,
+    upper: Optional[Numerical] = None,
+):
+    if isinstance(variable, str):
+        variable = Symbol(variable)
+    if not isinstance(variable, Symbol):
+        raise TypeError("Integral variable must be Symbol or str.")
+    return Integral(expression, variable, lower, upper)
 
 
 def is_int_or_float(value):

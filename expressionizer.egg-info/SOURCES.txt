@@ -4,12 +4,15 @@ pyproject.toml
 expressionizer/__init__.py
 expressionizer/equation_generation.py
 expressionizer/evaluator.py
+expressionizer/explanation_audit.py
 expressionizer/expression.py
 expressionizer/number_format.py
 expressionizer/procedural.py
+expressionizer/procedural_test.py
 expressionizer/render.py
 expressionizer/solve_equation.py
 expressionizer/test.py
+expressionizer/validation.py
 expressionizer.egg-info/PKG-INFO
 expressionizer.egg-info/SOURCES.txt
 expressionizer.egg-info/dependency_links.txt

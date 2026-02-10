@@ -2,11 +2,14 @@ import builtins
 import inspect
 import math
 import sys
-from dataclasses import dataclass
-from typing import Optional, Union
+from dataclasses import dataclass, field
+from typing import Any, Callable, Literal, Optional, Union
 
 from .expression import (
     FunctionCall,
+    MathFunction,
+    Derivative,
+    Integral,
     Numerical,
     Power,
     Product,
@@ -18,6 +21,7 @@ from .expression import (
     power,
     product,
     sum,
+    derivative,
 )
 from .number_format import to_trimmed_decimal_string
 from .render import render_latex, render_type
@@ -41,7 +45,11 @@ from expressionizer.expression import (
     sum,
     product,
     FunctionCall,
+    MathFunction,
+    Derivative,
+    Integral,
     is_int_or_float,
+    derivative,
 )
 from expressionizer.render import render_latex, render_type
 import inspect
@@ -59,15 +67,85 @@ def round_sig(x, sig=2):
 
 
 @dataclass
+class WordingOptions:
+    templates: dict[str, str] = field(default_factory=dict)
+    concise_templates: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class ExplanationEvent:
+    rule_id: str
+    category: str
+    input_expr: Optional[Numerical] = None
+    output_expr: Optional[Numerical] = None
+    message: Optional[str] = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    quality_flags: list[str] = field(default_factory=list)
+
+
+@dataclass
+class CalculusRule:
+    rule_id: str
+    category: Literal["derivative", "integral"]
+    matches: Callable[[Numerical, Symbol], bool]
+    apply: Callable[[Numerical, Symbol], Numerical]
+
+
+def wording(
+    context: "EvaluatorContext",
+    key: str,
+    verbose: str,
+    concise: Optional[str] = None,
+    **kwargs,
+) -> str:
+    style = context.options.wording_style
+    concise = concise if concise is not None else verbose
+
+    template = verbose if style == "verbose" else concise
+    options = context.options.wording_options
+    if options is not None:
+        if style == "concise":
+            template = (
+                options.concise_templates.get(key)
+                or options.templates.get(key)
+                or template
+            )
+        else:
+            template = options.templates.get(key, template)
+
+    if kwargs:
+        for k, v in kwargs.items():
+            template = template.replace("{" + k + "}", str(v))
+    return template
+
+
+@dataclass
 class EvaluatorOptions:
     implicit_multiplication_limit: int = 12
     implicit_addition_limit: int = 100
     slow_step_addition: bool = True
     expand_powers: bool = True
+    expand_power_limit: Optional[int] = None
     max_precision: int = 5
     max_exponent: int = 100
     min_value: float = 1e-6
     max_value: float = 1e6
+    clamp_numeric_literals: bool = False
+    compact_integer_multiplication: bool = True
+    allow_approximation: bool = True
+    wording_style: Literal["verbose", "concise"] = "verbose"
+    wording_options: Optional[WordingOptions] = None
+    show_complexity_explanations: bool = True
+    show_decimal_shift_explanations: bool = True
+    show_multiplication_table: bool = True
+    show_addition_alignment_block: bool = True
+    show_place_value_steps: bool = True
+    show_addition_value_list: bool = True
+    show_rule_name: bool = False
+    show_assumptions: bool = False
+    explanation_verbosity: Literal["minimal", "normal", "detailed"] = "normal"
+    zero_power_zero_policy: Literal["undefined", "one", "zero"] = "undefined"
+    overflow_policy: Literal["symbolic", "infinity", "zero"] = "symbolic"
 
 
 class Snapshot:
@@ -167,6 +245,10 @@ class EvaluatorContext:
     error_count: int
     is_approximate: bool
     blocks: list[BlockContext]
+    explanation_events: list[ExplanationEvent]
+    solve_status: Literal["exact", "partial", "unsolved"]
+    reason_code: Optional[str]
+    coverage_tags: set[str]
 
     def __init__(
         self,
@@ -184,6 +266,52 @@ class EvaluatorContext:
         self.error_on_invalid_snap = error_on_invalid_snap
         self.error_count = 0
         self.is_approximate = False
+        self.explanation_events = []
+        self.solve_status = "exact"
+        self.reason_code = None
+        self.coverage_tags = set()
+
+    def add_coverage_tag(self, tag: str):
+        if tag:
+            self.coverage_tags.add(tag)
+
+    def set_status(
+        self,
+        status: Literal["exact", "partial", "unsolved"],
+        reason_code: Optional[str] = None,
+    ):
+        rank = {"exact": 0, "partial": 1, "unsolved": 2}
+        if rank[status] > rank[self.solve_status]:
+            self.solve_status = status
+            self.reason_code = reason_code
+        elif self.reason_code is None and reason_code is not None:
+            self.reason_code = reason_code
+
+    def emit_event(
+        self,
+        rule_id: str,
+        category: str,
+        input_expr: Optional[Numerical] = None,
+        output_expr: Optional[Numerical] = None,
+        message: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        quality_flags: Optional[list[str]] = None,
+        emit_text: bool = False,
+    ):
+        event = ExplanationEvent(
+            rule_id=rule_id,
+            category=category,
+            input_expr=input_expr,
+            output_expr=output_expr,
+            message=message,
+            metadata=metadata or {},
+            quality_flags=quality_flags or [],
+        )
+        self.explanation_events.append(event)
+        self.add_coverage_tag(rule_id)
+        if emit_text and message:
+            prefix = f"[{rule_id}] " if self.options.show_rule_name else ""
+            self.snap(prefix + message, False)
 
     def snap(
         self,
@@ -254,20 +382,31 @@ class EvaluatorContext:
     def render_expressions(self, snapshots: list[Snapshot]):
         if len(snapshots) == 0:
             return ""
-        if len(snapshots) == 1 and snapshots[0].previous_tree != snapshots[0].full_tree:
-            return f"$$ {render_latex(snapshots[0].previous_tree)} = {render_latex(snapshots[0].full_tree)} $$"
-        else:
-            text = "$$"
-            i = 0
-            while i < len(snapshots):
-                if i > 0:
-                    text += "= "
-                text += render_latex(snapshots[i].full_tree)
-                if i < len(snapshots) - 1:
-                    text += " \\\\\n"
-                i += 1
-            text += "$$\n"
-            return text
+
+        # Split into coherent rewrite chains so each displayed "=" transition is valid.
+        chains: list[list[Snapshot]] = [[snapshots[0]]]
+        for snapshot in snapshots[1:]:
+            last = chains[-1][-1]
+            if snapshot.previous_tree == last.full_tree:
+                chains[-1].append(snapshot)
+            else:
+                chains.append([snapshot])
+
+        rendered_chains: list[str] = []
+        for chain in chains:
+            first = chain[0]
+            if len(chain) == 1 and first.previous_tree == first.full_tree:
+                rendered_chains.append(f"$$ {render_latex(first.full_tree)} $$")
+                continue
+
+            text = "$$ "
+            text += render_latex(first.previous_tree)
+            for snapshot in chain:
+                text += " \\\\\n= " + render_latex(snapshot.full_tree)
+            text += " $$"
+            rendered_chains.append(text)
+
+        return "\n".join(rendered_chains) + ("\n" if rendered_chains else "")
 
     def render(self):
         steps = [[]]
@@ -391,6 +530,19 @@ class EvaluatorContext:
                 text += substep + "\n"
         return text
 
+    def render_explanation_events(self):
+        if len(self.explanation_events) == 0:
+            return ""
+        lines = []
+        for i, event in enumerate(self.explanation_events, 1):
+            line = f"{i}. [{event.category}] {event.rule_id}"
+            if event.message:
+                line += f" - {event.message}"
+            if len(event.quality_flags) > 0:
+                line += f" (flags: {', '.join(event.quality_flags)})"
+            lines.append(line)
+        return "\n".join(lines)
+
     def block(self, trees: list[Numerical]):
         self.blocks.append(BlockContext(trees, self))
         return self.blocks[-1]
@@ -453,7 +605,8 @@ def get_coefficient_exponent(x):
             # e.g. 0.005 → coeff=5, exp=-3
             first_nonzero = next(i for i, c in enumerate(decimal_part) if c != "0")
             coeff = int(decimal_part[first_nonzero:])
-            exp = -(first_nonzero + 1)
+            # Value is coeff * 10^{-len(decimal_part)} after trimming leading zeros.
+            exp = -len(decimal_part)
         else:
             # e.g. 3.28 → 328, -2
             coeff = int(integer_part + decimal_part)
@@ -548,7 +701,8 @@ def solve_sum(components, context: EvaluatorContext):
     max_length = len(lines[0]) - 1 if has_negative else len(lines[0])
     # old snapshot (exact behavior retained)
     addition = "```\n" + "\n".join(lines) + "\n```"
-    context.snap(addition, False)
+    if context.options.show_addition_alignment_block:
+        context.snap(addition, False)
 
     # For backward-compat with your later indexing:
     addition = addition.split("\n")[1:-1]  # trim the fences
@@ -613,16 +767,41 @@ def solve_sum(components, context: EvaluatorContext):
             else:
                 step = f"$10^{{{p}}}$: ${sum_values}$"
             if carry > 0:
-                step += f", carry the {carry}."
+                step += wording(
+                    context,
+                    "addition_carry_suffix",
+                    f", carry the {carry}.",
+                    f", carry {carry}.",
+                    carry=carry,
+                )
             elif carry < 0:
-                step += f", borrow a {-carry} and add 10 to get {digit}."
-            context.snap(step, False)
+                step += wording(
+                    context,
+                    "addition_borrow_suffix",
+                    f", borrow a {-carry} and add 10 to get {digit}.",
+                    f", borrow {-carry}; digit becomes {digit}.",
+                    borrow=-carry,
+                    digit=digit,
+                )
+            if context.options.show_place_value_steps:
+                context.snap(step, False)
     # leftover carry
     if carry > 0:
         # put carry to the left of everything (may need more than 1 digit)
         c_str = str(abs(carry))
         final = list(c_str) + final
-        context.snap(f"$10^{{{p+1}}}$: {carry} (carried)", False)
+        if context.options.show_place_value_steps:
+            context.snap(
+                wording(
+                    context,
+                    "addition_carry_row",
+                    f"$10^{{{p+1}}}$: {carry} (carried)",
+                    f"$10^{{{p+1}}}$: {carry} carried",
+                    power=p + 1,
+                    carry=carry,
+                ),
+                False,
+            )
         carry = 0
     result_str = "".join(str(x) for x in final).strip()
 
@@ -630,7 +809,16 @@ def solve_sum(components, context: EvaluatorContext):
     result = float(result_str) if "." in result_str else int(result_str)
     if carry < 0:
         result = -(-carry * 10 ** (p + 1) - result)
-    context.snap(f"Putting it together, we get ${result}$.", False)
+    context.snap(
+        wording(
+            context,
+            "addition_put_together",
+            f"Putting it together, we get ${result}$.",
+            f"Result: ${result}$.",
+            result=result,
+        ),
+        False,
+    )
     context.snap(Sum(components), result)
     return result
 
@@ -649,7 +837,18 @@ def add(a, b, context: EvaluatorContext):
     a_components = decompose_number(a)
     b_components = decompose_number(b)
     all_components = a_components + b_components
-    context.snap(f"Let's break ${a}$ and ${b}$ down into their components.", False)
+    if context.options.show_complexity_explanations:
+        context.snap(
+            wording(
+                context,
+                "addition_decompose_intro",
+                f"Let's break ${a}$ and ${b}$ down into their components.",
+                f"Decompose ${a}$ and ${b}$ into place-value components.",
+                a=a,
+                b=b,
+            ),
+            False,
+        )
     context.snap(Sum([a, b]), Sum(all_components))
     if context.options.slow_step_addition:
         result = solve_sum(all_components, context)
@@ -664,6 +863,18 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
     limit = context.options.implicit_multiplication_limit
     a_coefficient, a_exponent = get_coefficient_exponent(a)
     b_coefficient, b_exponent = get_coefficient_exponent(b)
+    a_is_integer_like = isinstance(a, int) or (isinstance(a, float) and a.is_integer())
+    b_is_integer_like = isinstance(b, int) or (isinstance(b, float) and b.is_integer())
+    if (
+        context.options.compact_integer_multiplication
+        and is_int_or_float(a)
+        and is_int_or_float(b)
+        and a_is_integer_like
+        and b_is_integer_like
+        and min(abs(int(a)), abs(int(b))) <= limit
+    ):
+        context.snap(Product([a, b]), a * b)
+        return a * b
     if (
         -limit <= a_coefficient <= limit
         and -limit <= b_coefficient <= limit
@@ -733,23 +944,48 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
             )
 
         return a * b
-    context.snap(
-        f"Because ${a}$ and ${b}$ are both too complex, let's break their product down into components and use a table to multiply each product. Then, we can sum the problems to find the solution to ${a} \\cdot {b}$.",
-        False,
-    )
-    if len(str(a_coefficient)) > context.options.max_precision:
+    if context.options.show_complexity_explanations:
+        context.snap(
+            wording(
+                context,
+                "multiply_complex_intro",
+                f"Because ${a}$ and ${b}$ are both too complex, let's break their product down into components and use a table to multiply each product. Then, we can sum the problems to find the solution to ${a} \\cdot {b}$.",
+                f"Break ${a} \\cdot {b}$ into place-value components and sum the partial products.",
+                a=a,
+                b=b,
+            ),
+            False,
+        )
+    if (
+        context.options.allow_approximation
+        and
+        a_exponent < 0
+        and len(str(abs(a_coefficient))) > context.options.max_precision
+    ):
         a_approx = (
             round_sig(a_coefficient, context.options.max_precision) * 10**a_exponent
         )
         context.snap(
             a,
             a_approx,
-            f"${a}$ has too many decimal places. Let's approximate it to {a_approx} to make the multiplication easier.",
+            wording(
+                context,
+                "multiply_approximate_a",
+                f"${a}$ has too many significant digits. Let's approximate it to {a_approx} to make the multiplication easier.",
+                f"Approximate ${a}$ as ${a_approx}$ for easier multiplication.",
+                a=a,
+                approximate=a_approx,
+            ),
             approximate=True,
         )
     else:
         a_approx = a
-    if len(str(b_coefficient)) > context.options.max_precision:
+    if (
+        context.options.allow_approximation
+        and
+        b_exponent < 0
+        and len(str(abs(b_coefficient))) > context.options.max_precision
+    ):
         b_approx = (
             round_sig(b_coefficient, context.options.max_precision) * 10**b_exponent
         )
@@ -758,7 +994,14 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
                 b,
                 b_approx,
                 (
-                    f"${b}$ has too many decimal places. Let's approximate it to {b_approx} to make the multiplication easier."
+                    wording(
+                        context,
+                        "multiply_approximate_b",
+                        f"${b}$ has too many significant digits. Let's approximate it to {b_approx} to make the multiplication easier.",
+                        f"Approximate ${b}$ as ${b_approx}$ for easier multiplication.",
+                        b=b,
+                        approximate=b_approx,
+                    )
                     if b != a
                     else None
                 ),
@@ -772,18 +1015,34 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
     b_coefficient, b_exponent = get_coefficient_exponent(b)
     total_exponent = 0
     if a_exponent != 0:
-        context.snap(
-            f"Multiply ${a}$ by $10^{{{a_exponent}}}$ to shift the decimal point to make the math easier.",
-            False,
-        )
+        if context.options.show_decimal_shift_explanations:
+            context.snap(
+                wording(
+                    context,
+                    "multiply_decimal_shift_a",
+                    f"Multiply ${a}$ by $10^{{{a_exponent}}}$ to shift the decimal point to make the math easier.",
+                    f"Rewrite ${a}$ using $10^{{{a_exponent}}}$ scaling.",
+                    a=a,
+                    exponent=a_exponent,
+                ),
+                False,
+            )
         total_exponent += a_exponent
 
     if b_exponent != 0:
         if not (b_coefficient == a_coefficient and b_exponent == a_exponent):
-            context.snap(
-                f"Multiply ${b}$ by $10^{{{b_exponent}}}$ to shift the decimal point to make the math easier.",
-                False,
-            )
+            if context.options.show_decimal_shift_explanations:
+                context.snap(
+                    wording(
+                        context,
+                        "multiply_decimal_shift_b",
+                        f"Multiply ${b}$ by $10^{{{b_exponent}}}$ to shift the decimal point to make the math easier.",
+                        f"Rewrite ${b}$ using $10^{{{b_exponent}}}$ scaling.",
+                        b=b,
+                        exponent=b_exponent,
+                    ),
+                    False,
+                )
         total_exponent += b_exponent
     if a != a_coefficient or b != b_coefficient:
         context.snap(
@@ -795,6 +1054,7 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
 
     a = int(a)
     b = int(b)
+    exact_core_result = a * b
     a_str, b_str = str(a), str(b)
     a_components = decompose_number(a)
     b_components = decompose_number(b)
@@ -828,31 +1088,61 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
             if x < w and y < h:
                 all_components.append(grid[y][x])
     context.snap(Product([a, b]), Product([Sum(a_components), Sum(b_components)]))
-    context.snap("\n**Table of products:**", False)
-    table = generate_table(rows)
-    context.snap(table, False)
+    if context.options.show_multiplication_table:
+        context.snap(
+            wording(
+                context,
+                "multiply_table_header",
+                "\n**Table of products:**",
+                "\n**Partial products:**",
+            ),
+            False,
+        )
+        table = generate_table(rows)
+        context.snap(table, False)
     context.snap(Product([Sum(a_components), Sum(b_components)]), Sum(all_components))
     if context.options.slow_step_addition:
-        context.snap("**List of values to add:**", False)
-        result = solve_sum(all_components, context)
-        if total_exponent != 0:
+        if context.options.show_addition_value_list:
             context.snap(
-                Product([result, Power(10, total_exponent)]),
-                result * 10**total_exponent,
+                wording(
+                    context,
+                    "multiply_values_list_header",
+                    "**List of values to add:**",
+                    "**Values to add:**",
+                ),
+                False,
             )
-            result *= 10**total_exponent
+        result = solve_sum(all_components, context)
+        if result != exact_core_result:
+            context.snap(Sum(all_components), exact_core_result)
+            result = exact_core_result
+        if total_exponent != 0:
+            scaled_original = Product([result, Power(10, total_exponent)])
+            try:
+                scaled_result = result * 10**total_exponent
+            except OverflowError:
+                # Keep exact symbolic scaling when float conversion would overflow.
+                result = scaled_original
+            else:
+                context.snap(scaled_original, scaled_result)
+                result = scaled_result
         context.snap("", True)
         return result
     else:
-        context.snap(Sum(all_components), a * b)
+        result = exact_core_result
+        context.snap(Sum(all_components), result)
         if total_exponent != 0:
-            context.snap(
-                Product([result, Power(10, -total_exponent)]),
-                result * 10**total_exponent,
-            )
-            result *= 10**total_exponent
+            scaled_original = Product([result, Power(10, total_exponent)])
+            try:
+                scaled_result = result * 10**total_exponent
+            except OverflowError:
+                # Keep exact symbolic scaling when float conversion would overflow.
+                result = scaled_original
+            else:
+                context.snap(scaled_original, scaled_result)
+                result = scaled_result
         context.snap("", True)
-        return a * b
+        return result
 
 
 def replace_symbols(expression: Numerical, context: EvaluatorContext):
@@ -887,6 +1177,45 @@ def replace_symbols(expression: Numerical, context: EvaluatorContext):
                     replace_symbols(arg, context)
                     for arg in expression.superscript_arguments
                 ],
+            )
+        case Derivative():
+            bound_names = {v.name for v, _ in expression.variables}
+            filtered = {
+                k: v
+                for k, v in context.substitutions.items()
+                if not (isinstance(k, str) and k in bound_names)
+            }
+            inner_context = EvaluatorContext(
+                expression.expression,
+                filtered,
+                options=context.options,
+                error_on_invalid_snap=False,
+            )
+            return Derivative(
+                replace_symbols(expression.expression, inner_context),
+                expression.variables,
+            )
+        case Integral():
+            filtered = {
+                k: v
+                for k, v in context.substitutions.items()
+                if not (isinstance(k, str) and k == expression.variable.name)
+            }
+            inner_context = EvaluatorContext(
+                expression.expression,
+                filtered,
+                options=context.options,
+                error_on_invalid_snap=False,
+            )
+            return Integral(
+                replace_symbols(expression.expression, inner_context),
+                expression.variable,
+                replace_symbols(expression.lower, context)
+                if expression.lower is not None
+                else None,
+                replace_symbols(expression.upper, context)
+                if expression.upper is not None
+                else None,
             )
         case _:
             return expression
@@ -980,7 +1309,7 @@ def replace_sub(expr, target, replacement):
                         and len(term.factors) == 2
                         and -1 in term.factors
                     ):
-                        expr_terms.append(term.factors[0] * term.factors[1])
+                        expr_terms.append(product([term.factors[0], term.factors[1]]))
                     else:
                         expr_terms.append(term)
                 target_terms = []
@@ -994,7 +1323,7 @@ def replace_sub(expr, target, replacement):
                         and len(term.factors) == 2
                         and -1 in term.factors
                     ):
-                        target_terms.append(term.factors[0] * term.factors[1])
+                        target_terms.append(product([term.factors[0], term.factors[1]]))
                     else:
                         target_terms.append(term)
                 for term in expr_terms:
@@ -1021,6 +1350,25 @@ def replace_sub(expr, target, replacement):
                     replace_sub(a, target, replacement)
                     for a in expr.superscript_arguments
                 ],
+            )
+        case Derivative():
+            return Derivative(
+                replace_sub(expr.expression, target, replacement),
+                [
+                    (replace_sub(v, target, replacement), o)
+                    for v, o in expr.variables
+                ],
+            )
+        case Integral():
+            return Integral(
+                replace_sub(expr.expression, target, replacement),
+                replace_sub(expr.variable, target, replacement),
+                replace_sub(expr.lower, target, replacement)
+                if expr.lower is not None
+                else None,
+                replace_sub(expr.upper, target, replacement)
+                if expr.upper is not None
+                else None,
             )
         case _:
             return expr  # atom
@@ -1053,8 +1401,68 @@ def contains(expr, target):
                 + [contains(a, target) for a in expr.subscript_arguments]
                 + [contains(a, target) for a in expr.superscript_arguments]
             )
+        case Derivative():
+            return contains(expr.expression, target) or sum(
+                [contains(v, target) for v, _ in expr.variables]
+            )
+        case Integral():
+            return (
+                contains(expr.expression, target)
+                or contains(expr.variable, target)
+                or (
+                    contains(expr.lower, target)
+                    if expr.lower is not None
+                    else 0
+                )
+                or (
+                    contains(expr.upper, target)
+                    if expr.upper is not None
+                    else 0
+                )
+            )
         case _:
             return 0
+
+
+def _contains_node_type(expr: Numerical, node_types: tuple[type, ...]) -> bool:
+    if isinstance(expr, node_types):
+        return True
+    match expr:
+        case Sum():
+            return any(_contains_node_type(term, node_types) for term in expr.terms)
+        case Product():
+            return any(_contains_node_type(factor, node_types) for factor in expr.factors)
+        case Power():
+            return _contains_node_type(expr.base, node_types) or _contains_node_type(
+                expr.exponent, node_types
+            )
+        case FunctionCall():
+            return any(
+                _contains_node_type(arg, node_types)
+                for arg in (
+                    expr.functional_arguments
+                    + expr.subscript_arguments
+                    + expr.superscript_arguments
+                )
+            )
+        case Derivative():
+            return _contains_node_type(expr.expression, node_types)
+        case Integral():
+            return (
+                _contains_node_type(expr.expression, node_types)
+                or (
+                    _contains_node_type(expr.lower, node_types)
+                    if expr.lower is not None
+                    else False
+                )
+                or (
+                    _contains_node_type(expr.upper, node_types)
+                    if expr.upper is not None
+                    else False
+                )
+            )
+        case _:
+            return False
 
 
 def _get_term_parts(term):
@@ -1091,7 +1499,7 @@ def get_fraction(expr):
 
     # Case 1: Power
     if isinstance(expr, Power):
-        if expr.exponent < 0:
+        if is_int_or_float(expr.exponent) and expr.exponent < 0:
             numerator = 1
             denominator = Power(expr.base, -expr.exponent)
             return (numerator, denominator)
@@ -1103,7 +1511,11 @@ def get_fraction(expr):
         num_factors = []
         den_factors = []
         for factor in expr.factors:
-            if isinstance(factor, Power) and factor.exponent < 0:
+            if (
+                isinstance(factor, Power)
+                and is_int_or_float(factor.exponent)
+                and factor.exponent < 0
+            ):
                 den_factors.append(Power(factor.base, -factor.exponent))
             elif factor == 1:
                 num_factors.append(factor)  # Keep '1' in numerator (harmless)
@@ -1121,6 +1533,439 @@ def get_fraction(expr):
     return None
 
 
+def _contains_symbol(expr: Numerical, variable: Symbol) -> bool:
+    match expr:
+        case int() | float():
+            return False
+        case Symbol():
+            return expr.name == variable.name
+        case Sum():
+            return any(_contains_symbol(term, variable) for term in expr.terms)
+        case Product():
+            return any(_contains_symbol(factor, variable) for factor in expr.factors)
+        case Power():
+            return _contains_symbol(expr.base, variable) or _contains_symbol(
+                expr.exponent, variable
+            )
+        case FunctionCall():
+            return any(_contains_symbol(arg, variable) for arg in expr.functional_arguments) or any(
+                _contains_symbol(arg, variable) for arg in expr.subscript_arguments
+            ) or any(_contains_symbol(arg, variable) for arg in expr.superscript_arguments)
+        case Derivative():
+            return _contains_symbol(expr.expression, variable)
+        case Integral():
+            if expr.variable.name == variable.name:
+                return False
+            in_bounds = (
+                (expr.lower is not None and _contains_symbol(expr.lower, variable))
+                or (expr.upper is not None and _contains_symbol(expr.upper, variable))
+            )
+            return _contains_symbol(expr.expression, variable) or in_bounds
+        case _:
+            return False
+
+
+def _substitute_symbol(expr: Numerical, variable: Symbol, value: Numerical) -> Numerical:
+    match expr:
+        case Symbol():
+            return value if expr.name == variable.name else expr
+        case Sum():
+            return Sum([_substitute_symbol(term, variable, value) for term in expr.terms])
+        case Product():
+            return Product(
+                [_substitute_symbol(factor, variable, value) for factor in expr.factors]
+            )
+        case Power():
+            return Power(
+                _substitute_symbol(expr.base, variable, value),
+                _substitute_symbol(expr.exponent, variable, value),
+            )
+        case FunctionCall():
+            return FunctionCall(
+                expr.function,
+                [
+                    _substitute_symbol(arg, variable, value)
+                    for arg in expr.functional_arguments
+                ],
+                [_substitute_symbol(arg, variable, value) for arg in expr.subscript_arguments],
+                [
+                    _substitute_symbol(arg, variable, value)
+                    for arg in expr.superscript_arguments
+                ],
+            )
+        case Derivative():
+            if any(v.name == variable.name for v, _ in expr.variables):
+                return expr
+            return Derivative(
+                _substitute_symbol(expr.expression, variable, value), expr.variables
+            )
+        case Integral():
+            if expr.variable.name == variable.name:
+                return Integral(
+                    expr.expression,
+                    expr.variable,
+                    _substitute_symbol(expr.lower, variable, value)
+                    if expr.lower is not None
+                    else None,
+                    _substitute_symbol(expr.upper, variable, value)
+                    if expr.upper is not None
+                    else None,
+                )
+            return Integral(
+                _substitute_symbol(expr.expression, variable, value),
+                expr.variable,
+                _substitute_symbol(expr.lower, variable, value)
+                if expr.lower is not None
+                else None,
+                _substitute_symbol(expr.upper, variable, value)
+                if expr.upper is not None
+                else None,
+            )
+        case _:
+            return expr
+
+
+def _diff_match_numeric(expr: Numerical, _: Symbol) -> bool:
+    return is_int_or_float(expr)
+
+
+def _diff_apply_numeric(_: Numerical, __: Symbol) -> Numerical:
+    return 0
+
+
+def _diff_match_symbol(expr: Numerical, _: Symbol) -> bool:
+    return isinstance(expr, Symbol)
+
+
+def _diff_apply_symbol(expr: Numerical, variable: Symbol) -> Numerical:
+    return 1 if expr.name == variable.name else 0
+
+
+def _diff_match_sum(expr: Numerical, _: Symbol) -> bool:
+    return isinstance(expr, Sum)
+
+
+def _diff_apply_sum(expr: Numerical, variable: Symbol) -> Numerical:
+    return sum([_differentiate_once(term, variable) for term in expr.terms])
+
+
+def _diff_match_product(expr: Numerical, _: Symbol) -> bool:
+    return isinstance(expr, Product)
+
+
+def _diff_apply_product(expr: Numerical, variable: Symbol) -> Numerical:
+    terms = []
+    for i, factor in enumerate(expr.factors):
+        d_factor = _differentiate_once(factor, variable)
+        if d_factor == 0:
+            continue
+        new_factors = expr.factors.copy()
+        new_factors[i] = d_factor
+        terms.append(product(new_factors))
+    return sum(terms) if len(terms) > 0 else 0
+
+
+def _diff_match_power(expr: Numerical, _: Symbol) -> bool:
+    return isinstance(expr, Power)
+
+
+def _diff_apply_power(expr: Numerical, variable: Symbol) -> Numerical:
+    base = expr.base
+    exponent = expr.exponent
+    d_base = _differentiate_once(base, variable)
+    d_exponent = _differentiate_once(exponent, variable)
+    if is_int_or_float(exponent):
+        return product([exponent, power(base, exponent - 1), d_base])
+    if d_exponent == 0:
+        return product([exponent, power(base, exponent - 1), d_base])
+    return product(
+        [
+            power(base, exponent),
+            sum(
+                [
+                    product(
+                        [
+                            d_exponent,
+                            FunctionCall(MathFunction("ln", functional_parameters=1), [base]),
+                        ]
+                    ),
+                    product([exponent, d_base, power(base, -1)]),
+                ]
+            ),
+        ]
+    )
+
+
+def _diff_match_function(expr: Numerical, _: Symbol) -> bool:
+    return isinstance(expr, FunctionCall)
+
+
+def _diff_apply_function(expr: Numerical, variable: Symbol) -> Numerical:
+    if len(expr.functional_arguments) != 1:
+        return derivative(expr, [(variable, 1)])
+    arg = expr.functional_arguments[0]
+    d_arg = _differentiate_once(arg, variable)
+    if d_arg == 0:
+        return 0
+    name = expr.function.name
+    if name == "sin":
+        return product([FunctionCall(MathFunction("cos", 1), [arg]), d_arg])
+    if name == "cos":
+        return product([-1, FunctionCall(MathFunction("sin", 1), [arg]), d_arg])
+    if name == "tan":
+        return product([power(FunctionCall(MathFunction("sec", 1), [arg]), 2), d_arg])
+    if name == "exp":
+        return product([FunctionCall(MathFunction("exp", 1), [arg]), d_arg])
+    if name == "ln":
+        return product([d_arg, power(arg, -1)])
+    if name == "sqrt":
+        return product(
+            [
+                d_arg,
+                power(2, -1),
+                power(FunctionCall(MathFunction("sqrt", 1), [arg]), -1),
+            ]
+        )
+    if name == "log" and len(expr.subscript_arguments) == 1:
+        base = expr.subscript_arguments[0]
+        if not _contains_symbol(base, variable):
+            return product(
+                [
+                    d_arg,
+                    power(arg, -1),
+                    power(
+                        FunctionCall(MathFunction("ln", functional_parameters=1), [base]),
+                        -1,
+                    ),
+                ]
+            )
+    return derivative(expr, [(variable, 1)])
+
+
+def _diff_match_derivative(expr: Numerical, _: Symbol) -> bool:
+    return isinstance(expr, Derivative)
+
+
+def _diff_apply_derivative(expr: Numerical, variable: Symbol) -> Numerical:
+    return derivative(expr.expression, expr.variables + [(variable, 1)])
+
+
+def _diff_match_integral(expr: Numerical, _: Symbol) -> bool:
+    return isinstance(expr, Integral)
+
+
+def _diff_apply_integral(expr: Numerical, variable: Symbol) -> Numerical:
+    if expr.lower is None and expr.upper is None and expr.variable.name == variable.name:
+        return expr.expression
+    return derivative(expr, [(variable, 1)])
+
+
+def _int_match_constant(expr: Numerical, _: Symbol) -> bool:
+    return is_int_or_float(expr)
+
+
+def _int_apply_constant(expr: Numerical, variable: Symbol) -> Numerical:
+    return product([expr, variable])
+
+
+def _int_match_symbol(expr: Numerical, _: Symbol) -> bool:
+    return isinstance(expr, Symbol)
+
+
+def _int_apply_symbol(expr: Numerical, variable: Symbol) -> Numerical:
+    if expr.name == variable.name:
+        return product([power(variable, 2), power(2, -1)])
+    return product([expr, variable])
+
+
+def _int_match_sum(expr: Numerical, _: Symbol) -> bool:
+    return isinstance(expr, Sum)
+
+
+def _int_apply_sum(expr: Numerical, variable: Symbol) -> Numerical:
+    return sum([_integrate_once(term, variable) for term in expr.terms])
+
+
+def _int_match_product(expr: Numerical, _: Symbol) -> bool:
+    return isinstance(expr, Product)
+
+
+def _int_apply_product(expr: Numerical, variable: Symbol) -> Numerical:
+    constant_factors = []
+    variable_factors = []
+    for factor in expr.factors:
+        if _contains_symbol(factor, variable):
+            variable_factors.append(factor)
+        else:
+            constant_factors.append(factor)
+    if len(variable_factors) == 0:
+        return product([expr, variable])
+    if len(variable_factors) == 1:
+        integrated = _integrate_once(variable_factors[0], variable)
+        return product(constant_factors + [integrated])
+    return Integral(expr, variable)
+
+
+def _int_match_power(expr: Numerical, _: Symbol) -> bool:
+    return isinstance(expr, Power)
+
+
+def _int_apply_power(expr: Numerical, variable: Symbol) -> Numerical:
+    if isinstance(expr.base, Symbol) and expr.base.name == variable.name and is_int_or_float(
+        expr.exponent
+    ):
+        if expr.exponent == -1:
+            return FunctionCall(MathFunction("ln", functional_parameters=1), [variable])
+        return product(
+            [
+                power(variable, expr.exponent + 1),
+                power(expr.exponent + 1, -1),
+            ]
+        )
+    return Integral(expr, variable)
+
+
+def _int_match_function(expr: Numerical, _: Symbol) -> bool:
+    return isinstance(expr, FunctionCall)
+
+
+def _int_apply_function(expr: Numerical, variable: Symbol) -> Numerical:
+    if len(expr.functional_arguments) != 1:
+        return Integral(expr, variable)
+    arg = expr.functional_arguments[0]
+    d_arg = _differentiate_once(arg, variable)
+    if not is_int_or_float(d_arg) or d_arg == 0:
+        return Integral(expr, variable)
+    inv = power(d_arg, -1)
+    name = expr.function.name
+    if name == "sin":
+        return product([-1, FunctionCall(MathFunction("cos", 1), [arg]), inv])
+    if name == "cos":
+        return product([FunctionCall(MathFunction("sin", 1), [arg]), inv])
+    if name == "exp":
+        return product([FunctionCall(MathFunction("exp", 1), [arg]), inv])
+    if name == "ln" and isinstance(arg, Symbol) and arg.name == variable.name:
+        return sum(
+            [
+                product([variable, FunctionCall(MathFunction("ln", 1), [variable])]),
+                product([-1, variable]),
+            ]
+        )
+    return Integral(expr, variable)
+
+
+def _int_match_derivative(expr: Numerical, _: Symbol) -> bool:
+    return isinstance(expr, Derivative)
+
+
+def _int_apply_derivative(expr: Numerical, variable: Symbol) -> Numerical:
+    if (
+        len(expr.variables) == 1
+        and expr.variables[0][0].name == variable.name
+        and expr.variables[0][1] == 1
+    ):
+        return expr.expression
+    return Integral(expr, variable)
+
+
+def _int_match_integral(expr: Numerical, _: Symbol) -> bool:
+    return isinstance(expr, Integral)
+
+
+def _int_apply_integral(expr: Numerical, variable: Symbol) -> Numerical:
+    return Integral(expr, variable)
+
+
+DERIVATIVE_RULES: list[CalculusRule] = [
+    CalculusRule("diff_numeric", "derivative", _diff_match_numeric, _diff_apply_numeric),
+    CalculusRule("diff_symbol", "derivative", _diff_match_symbol, _diff_apply_symbol),
+    CalculusRule("diff_sum", "derivative", _diff_match_sum, _diff_apply_sum),
+    CalculusRule("diff_product", "derivative", _diff_match_product, _diff_apply_product),
+    CalculusRule("diff_power", "derivative", _diff_match_power, _diff_apply_power),
+    CalculusRule("diff_function_chain", "derivative", _diff_match_function, _diff_apply_function),
+    CalculusRule("diff_nested_derivative", "derivative", _diff_match_derivative, _diff_apply_derivative),
+    CalculusRule("diff_integral", "derivative", _diff_match_integral, _diff_apply_integral),
+]
+
+
+INTEGRAL_RULES: list[CalculusRule] = [
+    CalculusRule("int_constant", "integral", _int_match_constant, _int_apply_constant),
+    CalculusRule("int_symbol", "integral", _int_match_symbol, _int_apply_symbol),
+    CalculusRule("int_sum", "integral", _int_match_sum, _int_apply_sum),
+    CalculusRule("int_product_constant_factor", "integral", _int_match_product, _int_apply_product),
+    CalculusRule("int_power_rule", "integral", _int_match_power, _int_apply_power),
+    CalculusRule("int_function_u_sub", "integral", _int_match_function, _int_apply_function),
+    CalculusRule("int_derivative_inverse", "integral", _int_match_derivative, _int_apply_derivative),
+    CalculusRule("int_nested_integral", "integral", _int_match_integral, _int_apply_integral),
+]
+
+
+def _apply_calculus_rule(
+    expr: Numerical,
+    variable: Symbol,
+    context: Optional[EvaluatorContext],
+    rules: list[CalculusRule],
+) -> Optional[Numerical]:
+    for rule in rules:
+        if rule.matches(expr, variable):
+            result = rule.apply(expr, variable)
+            if context is not None:
+                context.emit_event(
+                    rule_id=rule.rule_id,
+                    category=rule.category,
+                    input_expr=expr,
+                    output_expr=result,
+                )
+            return result
+    return None
+
+
+def _differentiate_once(expr: Numerical, variable: Symbol, context: Optional[EvaluatorContext] = None) -> Numerical:
+    if not _contains_symbol(expr, variable):
+        if context is not None:
+            context.emit_event(
+                "diff_constant_by_absence",
+                "derivative",
+                input_expr=expr,
+                output_expr=0,
+            )
+        return 0
+
+    result = _apply_calculus_rule(expr, variable, context, DERIVATIVE_RULES)
+    if result is not None:
+        return result
+
+    result = derivative(expr, [(variable, 1)])
+    if context is not None:
+        context.set_status("partial", "derivative_unsolved_rule")
+        context.emit_event(
+            "diff_fallback_symbolic",
+            "derivative",
+            input_expr=expr,
+            output_expr=result,
+            quality_flags=["unsolved_symbolic"],
+        )
+    return result
+
+
+def _integrate_once(expr: Numerical, variable: Symbol, context: Optional[EvaluatorContext] = None) -> Numerical:
+    result = _apply_calculus_rule(expr, variable, context, INTEGRAL_RULES)
+    if result is not None:
+        return result
+
+    fallback = Integral(expr, variable)
+    if context is not None:
+        context.set_status("partial", "integral_unsolved_rule")
+        context.emit_event(
+            "int_fallback_symbolic",
+            "integral",
+            input_expr=expr,
+            output_expr=fallback,
+            quality_flags=["unsolved_symbolic"],
+        )
+    return fallback
+
+
 def evaluate_expression(expression: Numerical, context: EvaluatorContext):
 
     result = None
@@ -1128,9 +1973,15 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
         case int() | float():
             if abs(expression) < context.options.min_value:
                 result = 0
-            elif expression > context.options.max_value:
+            elif (
+                context.options.clamp_numeric_literals
+                and expression > context.options.max_value
+            ):
                 result = float("inf")
-            elif expression < -context.options.min_value:
+            elif (
+                context.options.clamp_numeric_literals
+                and expression < -context.options.max_value
+            ):
                 result = float("-inf")
             else:
                 result = expression
@@ -1156,9 +2007,56 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
             else:
                 exponent = evaluate_expression(exponent, context)
             expression = Power(base, exponent)
+            if base == 0 and exponent == 0:
+                match context.options.zero_power_zero_policy:
+                    case "one":
+                        context.snap(
+                            expression,
+                            1,
+                            wording(
+                                context,
+                                "zero_power_zero_one",
+                                "$0^0$ is configured to evaluate to $1$.",
+                                "$0^0 \\rightarrow 1$ by configuration.",
+                            ),
+                        )
+                        return 1
+                    case "zero":
+                        context.snap(
+                            expression,
+                            0,
+                            wording(
+                                context,
+                                "zero_power_zero_zero",
+                                "$0^0$ is configured to evaluate to $0$.",
+                                "$0^0 \\rightarrow 0$ by configuration.",
+                            ),
+                        )
+                        return 0
+                    case _:
+                        raise MathDomainError(
+                            wording(
+                                context,
+                                "zero_power_zero_undefined",
+                                "0^0 is undefined in this evaluator configuration.",
+                                "0^0 is undefined.",
+                            ),
+                            expression,
+                        )
             if base in [0, 1]:
                 result = base
-                context.snap(expression, result, f"{base} to any power is {base}.")
+                context.snap(
+                    expression,
+                    result,
+                    wording(
+                        context,
+                        "base_trivial_power",
+                        f"{base} to any power is {base}.",
+                        f"{base}^{render_latex(exponent)} = {base}.",
+                        base=base,
+                        exponent=exponent,
+                    ),
+                )
                 return result
             if base == -1 and is_int_or_float(exponent) and exponent.is_integer():
                 # Determine sign
@@ -1169,49 +2067,75 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                 context.snap(
                     expression,
                     result,
-                    f"When $-1$ is raised to an even power, the result is $1$. When $-1$ is raised to an odd power, the result is $-1$. "
-                    + (
-                        f"Since in this case, our power is {exponent}, which is even, the result is $1$."
-                        if exponent % 2 == 0
-                        else f"Since in this case, our power is {exponent}, which is odd, the result is $-1$."
+                    wording(
+                        context,
+                        "minus_one_power_parity",
+                        f"When $-1$ is raised to an even power, the result is $1$. When $-1$ is raised to an odd power, the result is $-1$. "
+                        + (
+                            f"Since in this case, our power is {exponent}, which is even, the result is $1$."
+                            if exponent % 2 == 0
+                            else f"Since in this case, our power is {exponent}, which is odd, the result is $-1$."
+                        ),
+                        f"$-1^{{{exponent}}}$ depends on parity; result is ${result}$.",
+                        exponent=exponent,
+                        result=result,
                     ),
                 )
                 return result
 
             if is_int_or_float(base) and is_int_or_float(exponent):
-                if exponent > context.options.max_exponent and base > 1:
+                if (
+                    abs(exponent) > context.options.max_exponent
+                    and abs(base) not in [0, 1]
+                ):
+                    if context.options.overflow_policy == "infinity":
+                        context.snap(
+                            expression,
+                            float("inf"),
+                            explanation=wording(
+                                context,
+                                "overflow_infinity",
+                                "${previous}$ is outside the configured exponent limit, so we'll approximate it as $\\infty$.",
+                                "Exponent too large; approximate as $\\infty$.",
+                            ),
+                            approximate=True,
+                        )
+                        return float("inf")
+                    if context.options.overflow_policy == "zero":
+                        context.snap(
+                            expression,
+                            0,
+                            explanation=wording(
+                                context,
+                                "overflow_zero",
+                                "${previous}$ is outside the configured exponent limit, so we'll approximate it as $0$.",
+                                "Exponent too large; approximate as $0$.",
+                            ),
+                            approximate=True,
+                        )
+                        return 0
                     context.snap(
-                        expression,
-                        float("inf"),
-                        explanation="${previous}$ is too large to compute, so let's call it $\\infty$.",
-                        approximate=True,
+                        wording(
+                            context,
+                            "overflow_symbolic",
+                            f"${render_latex(expression)}$ is outside the configured numeric exponent limit, so we'll keep it in symbolic form.",
+                            f"Keep ${render_latex(expression)}$ symbolic due to exponent limit.",
+                            expression=render_latex(expression),
+                        ),
+                        False,
                     )
-                    return float("inf")  # Infinity, too large to compute
-                elif exponent < -context.options.max_exponent and base > 1:
-                    context.snap(
-                        expression,
-                        0,
-                        explanation="${previous}$ is too small to compute, so let's call it $0$.",
-                        approximate=True,
+                    return expression
+                if (
+                    context.options.expand_powers
+                    and exponent > 1
+                    and float(exponent).is_integer()
+                    and exponent
+                    <= (
+                        context.options.expand_power_limit
+                        if context.options.expand_power_limit is not None
+                        else context.options.max_precision
                     )
-                    return float("-inf")  # Infinity, too large to compute
-                elif exponent > context.options.max_exponent and base < 1:
-                    context.snap(
-                        expression,
-                        0,
-                        explanation="${previous}$ is too small to compute, so let's call it $0$.",
-                        approximate=True,
-                    )
-                    return 0
-                elif exponent < -context.options.max_exponent and base < 1:
-                    context.snap(
-                        expression,
-                        float("inf"),
-                        explanation="${previous}$ is too large to compute, so let's call it $\\infty$.",
-                        approximate=True,
-                    )
-                    return float("inf")  # Infinity, too large to compute
-                if context.options.expand_powers and exponent > 1:
+                ):
                     new_expression = Product(
                         [base] * math.floor(exponent)
                         + (
@@ -1226,11 +2150,55 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                     )
                     result = evaluate_expression(new_expression, context)
                 else:
-                    result = base**exponent
-                    context.snap(
-                        expression,
-                        result,
-                    )
+                    try:
+                        result = base**exponent
+                        if contains(context.current_tree, expression) > 0:
+                            context.snap(
+                                expression,
+                                result,
+                            )
+                        else:
+                            # Expression was normalized away in a sibling simplification.
+                            # Returning the computed value keeps evaluation stable.
+                            pass
+                    except OverflowError:
+                        if context.options.overflow_policy == "infinity":
+                            context.snap(
+                                expression,
+                                float("inf"),
+                                explanation=wording(
+                                    context,
+                                    "overflow_python_infinity",
+                                    "${previous}$ overflowed during numeric evaluation, so we'll approximate it as $\\infty$.",
+                                    "Numeric overflow; approximate as $\\infty$.",
+                                ),
+                                approximate=True,
+                            )
+                            return float("inf")
+                        if context.options.overflow_policy == "zero":
+                            context.snap(
+                                expression,
+                                0,
+                                explanation=wording(
+                                    context,
+                                    "overflow_python_zero",
+                                    "${previous}$ overflowed during numeric evaluation, so we'll approximate it as $0$.",
+                                    "Numeric overflow; approximate as $0$.",
+                                ),
+                                approximate=True,
+                            )
+                            return 0
+                        context.snap(
+                            wording(
+                                context,
+                                "overflow_python_symbolic",
+                                f"${render_latex(expression)}$ overflowed during numeric evaluation, so we'll keep it in symbolic form.",
+                                f"Keep ${render_latex(expression)}$ symbolic due to numeric overflow.",
+                                expression=render_latex(expression),
+                            ),
+                            False,
+                        )
+                        return expression
             else:
                 result = power(base, exponent)
                 context.snap(
@@ -1255,48 +2223,47 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                 return 1
             if len(factors) != len(expression.factors):
                 context.snap(expression, current_expression)
-            elif 0 in factors:
+            if 0 in factors:
                 context.snap(current_expression, 0)
                 return 0
+            # Check for a Sum to distribute
+            sum_to_distribute = None
+            for i, factor in enumerate(factors):
+                if isinstance(factor, Sum):
+                    sum_to_distribute = factor
+                    # Keep track of which factor was the sum
+                    sum_index = i
+                    break
+
+            if sum_to_distribute:
+                other_factors = [
+                    factor for i, factor in enumerate(factors) if i != sum_index
+                ]
+                new_terms = []
+                for term in sum_to_distribute.terms:
+                    # Create a new product for each term in the sum
+                    new_factors = other_factors + [term]
+                    new_product = product(new_factors)
+                    new_terms.append(new_product)
+
+                # The new expression is a sum of these new products
+                distributed_sum = Sum(new_terms)
+                context.snap(current_expression, distributed_sum)
+                return evaluate_expression(distributed_sum, context)
+            # Original logic if no distribution is needed
+            factors = sorted(factors, key=numerical_sort_key)
+            if all(is_int_or_float(factor) for factor in factors):
+                with context.block(factors) as block:
+                    result = block[0]
+                    i = 1
+                    while i < len(block):
+                        factor = block[i]
+                        result = multiply(result, factor, context)
+                        i += 1
             else:
-                # Check for a Sum to distribute
-                sum_to_distribute = None
-                for i, factor in enumerate(factors):
-                    if isinstance(factor, Sum):
-                        sum_to_distribute = factor
-                        # Keep track of which factor was the sum
-                        sum_index = i
-                        break
-
-                if sum_to_distribute:
-                    other_factors = [
-                        factor for i, factor in enumerate(factors) if i != sum_index
-                    ]
-                    new_terms = []
-                    for term in sum_to_distribute.terms:
-                        # Create a new product for each term in the sum
-                        new_factors = other_factors + [term]
-                        new_product = product(new_factors)
-                        new_terms.append(new_product)
-
-                    # The new expression is a sum of these new products
-                    distributed_sum = Sum(new_terms)
-                    context.snap(current_expression, distributed_sum)
-                    return evaluate_expression(distributed_sum, context)
-                # Original logic if no distribution is needed
-                factors = sorted(factors, key=numerical_sort_key)
-                if all(is_int_or_float(factor) for factor in factors):
-                    with context.block(factors) as block:
-                        result = block[0]
-                        i = 1
-                        while i < len(block):
-                            factor = block[i]
-                            result = multiply(result, factor, context)
-                            i += 1
-                else:
-                    new_expression = product([arg for arg in factors])
-                    context.snap(current_expression, new_expression)
-                    return new_expression
+                new_expression = product([arg for arg in factors])
+                context.snap(current_expression, new_expression)
+                return new_expression
         case Sum():
             # Stage 1: Recursively evaluate all terms first.
             terms = [evaluate_expression(term, context) for term in expression.terms]
@@ -1373,9 +2340,136 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                 return result
 
             return expression
+        case Derivative():
+            bound_names = {v.name for v, _ in expression.variables}
+            filtered = {
+                k: v
+                for k, v in context.substitutions.items()
+                if not (isinstance(k, str) and k in bound_names)
+            }
+            inner_context = EvaluatorContext(
+                expression.expression,
+                filtered,
+                options=context.options,
+                error_on_invalid_snap=False,
+            )
+            inner = evaluate_expression(
+                replace_symbols(expression.expression, inner_context), inner_context
+            )
+            derivative_expr = Derivative(inner, expression.variables)
+            result_expr = inner
+            for variable, order in expression.variables:
+                for _ in range(order):
+                    result_expr = _differentiate_once(result_expr, variable, context)
+            if derivative_expr != result_expr:
+                context.emit_event(
+                    "derivative_simplified",
+                    "derivative",
+                    input_expr=expression,
+                    output_expr=result_expr,
+                    message="Applied native differentiation rules.",
+                )
+                context.snap(
+                    expression,
+                    result_expr,
+                    wording(
+                        context,
+                        "derivative_result",
+                        f"Differentiate with respect to "
+                        + ", ".join(
+                            [
+                                (
+                                    f"${v.name}$"
+                                    if o == 1
+                                    else f"${v.name}$ (order {o})"
+                                )
+                                for v, o in expression.variables
+                            ]
+                        )
+                        + ".",
+                        "Applied differentiation rules.",
+                    ),
+                )
+                return evaluate_expression(result_expr, context)
+            context.set_status("partial", "derivative_unsolved_rule")
+            return derivative_expr
+        case Integral():
+            filtered = {
+                k: v
+                for k, v in context.substitutions.items()
+                if not (isinstance(k, str) and k == expression.variable.name)
+            }
+            inner_context = EvaluatorContext(
+                expression.expression,
+                filtered,
+                options=context.options,
+                error_on_invalid_snap=False,
+            )
+            inner = evaluate_expression(
+                replace_symbols(expression.expression, inner_context), inner_context
+            )
+            lower = (
+                evaluate_expression(expression.lower, context)
+                if expression.lower is not None
+                else None
+            )
+            upper = (
+                evaluate_expression(expression.upper, context)
+                if expression.upper is not None
+                else None
+            )
+            current_integral = Integral(inner, expression.variable, lower, upper)
+            antiderivative = _integrate_once(inner, expression.variable, context)
+            if lower is None or upper is None:
+                if isinstance(antiderivative, Integral):
+                    context.set_status("partial", "integral_unsolved_rule")
+                    return current_integral
+                context.emit_event(
+                    "integral_antiderivative_found",
+                    "integral",
+                    input_expr=expression,
+                    output_expr=antiderivative,
+                    message="Found antiderivative using native integration rules.",
+                )
+                context.snap(
+                    expression,
+                    antiderivative,
+                    wording(
+                        context,
+                        "integral_indefinite_result",
+                        f"Compute the antiderivative with respect to ${expression.variable.name}$.",
+                        "Applied integration rules.",
+                    ),
+                )
+                return evaluate_expression(antiderivative, context)
+
+            if isinstance(antiderivative, Integral):
+                context.set_status("partial", "definite_integral_unsolved_antiderivative")
+                return current_integral
+
+            upper_value = _substitute_symbol(antiderivative, expression.variable, upper)
+            lower_value = _substitute_symbol(antiderivative, expression.variable, lower)
+            difference = sum([upper_value, product([-1, lower_value])])
+            context.emit_event(
+                "integral_definite_evaluated",
+                "integral",
+                input_expr=expression,
+                output_expr=difference,
+                message="Applied Fundamental Theorem of Calculus with bounds.",
+            )
+            context.snap(
+                expression,
+                difference,
+                wording(
+                    context,
+                    "integral_definite_result",
+                    f"Apply the antiderivative at the bounds and subtract: $F({render_latex(upper)}) - F({render_latex(lower)})$.",
+                    "Evaluate antiderivative at bounds.",
+                ),
+            )
+            return evaluate_expression(difference, context)
 
         case FunctionCall():
-            state = context.save_state()
             with context.block(
                 expression.functional_arguments
             ) as functional_arguments, context.block(
@@ -1440,7 +2534,16 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                     [arg for arg in subscript_arguments],
                     [arg for arg in superscript_arguments],
                 )
-            context.replace(state, expression, result)
+            evaluated_call = FunctionCall(
+                expression.function,
+                [arg for arg in functional_arguments],
+                [arg for arg in subscript_arguments],
+                [arg for arg in superscript_arguments],
+            )
+            if contains(context.current_tree, evaluated_call) > 0:
+                context.snap(evaluated_call, result)
+            elif contains(context.current_tree, expression) > 0:
+                context.snap(expression, result)
         case Symbol():
             if expression.name in context.substitutions:
                 result = context.substitutions[expression.name]
@@ -1467,7 +2570,19 @@ def evaluate(
             for (k, v) in substitutions.items()
             if isinstance(k, str)
             and isinstance(
-                v, (int, float, complex, Sum, Product, Power, FunctionCall, Symbol)
+                v,
+                (
+                    int,
+                    float,
+                    complex,
+                    Sum,
+                    Product,
+                    Power,
+                    FunctionCall,
+                    Derivative,
+                    Integral,
+                    Symbol,
+                ),
             )
         }
         keys = list(variable_substitutions.keys())
@@ -1479,7 +2594,16 @@ def evaluate(
             elif i < len(keys) - 2:
                 sub += ", "
             substitutions.append(sub)
-        context.snap(f"Substitute {''.join(substitutions)}:", False)
+        context.snap(
+            wording(
+                context,
+                "substitution_intro",
+                f"Substitute {''.join(substitutions)}:",
+                f"Substitute {''.join(substitutions)}:",
+                substitutions="".join(substitutions),
+            ),
+            False,
+        )
         context.snap(
             expression,
             new_expression,
@@ -1493,8 +2617,29 @@ def evaluate(
     except MathDomainError as e:
         # The evaluation failed. The 'result' is the expression before the error.
         result = new_expression
+        context.set_status("unsolved", "math_domain_error")
         # Add a final step explaining the domain error.
-        error_message = f"We cannot simplify the expression any further because ${render_latex(e.expression)}$ is undefined. Those values are out of domain for {e.expression.function.name}."
+        if hasattr(e.expression, "function") and hasattr(e.expression.function, "name"):
+            error_message = wording(
+                context,
+                "domain_error_function",
+                f"We cannot simplify the expression any further because ${render_latex(e.expression)}$ is undefined. "
+                + f"Those values are out of domain for {e.expression.function.name}.",
+                f"${render_latex(e.expression)}$ is undefined for {e.expression.function.name}.",
+                expression=render_latex(e.expression),
+                function_name=e.expression.function.name,
+            )
+        else:
+            error_message = wording(
+                context,
+                "domain_error_generic",
+                f"We cannot simplify the expression any further because ${render_latex(e.expression)}$ is undefined.",
+                f"${render_latex(e.expression)}$ is undefined.",
+                expression=render_latex(e.expression),
+            )
         context.snap(error_message)
+
+    if _contains_node_type(result, (Integral, Derivative)):
+        context.set_status("partial", "symbolic_calculus_remaining")
 
     return result, context

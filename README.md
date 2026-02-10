@@ -49,6 +49,7 @@ Expressionizer is currently in a **pre-stable (0.x)** phase.
   - Random variable name generation
   - Random number generation with constraints
   - Weighted random expression generation for testing/content generation
+  - Optional calculus generation controls (`allow_calculus`, `difficulty`, `guarantee_solvable`)
 
 ## Installation
 
@@ -173,6 +174,18 @@ $$ 4 + 7 + 0.9 + 0.006 + 0.0002 + 0.00003 = 11.90623 $$
   - `product(factors)`
   - `power(base, exponent)`
   - `fraction(numerator, denominator)`
+  - `derivative(expression, variable, order=1)`
+  - `partial_derivative(expression, variables)`
+  - `integral(expression, variable, lower=None, upper=None)`
+
+## Calculus Coverage Notes
+
+Expressionizer includes a native rule-based calculus engine for derivatives and integrals, including multivariate differentiation and definite/indefinite integrals.
+
+- Coverage is strong for common educational forms (polynomials, many trig/exp/log forms, product/chain/power rules).
+- Some advanced integrals and non-elementary forms will remain symbolic (by design) rather than returning incorrect simplifications.
+- For procedural generation, prefer `guarantee_solvable=True` when you need high reliability for auto-generated calculus problems.
+- The evaluator now exposes solve metadata (`solve_status`, `reason_code`, coverage tags, explanation events) so you can filter low-confidence outputs in training pipelines.
 
 ## Compatibility
 

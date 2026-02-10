@@ -5,11 +5,17 @@ from .expression import (
     Product,
     Power,
     Sum,
+    product,
+    sum,
+    power,
     Symbol,
     Numerical,
     FunctionCall,
     MathFunction,
     is_int_or_float,
+    derivative,
+    partial_derivative,
+    integral,
 )
 
 import numpy as np
@@ -17,6 +23,41 @@ import math
 import random
 import math
 import statistics
+
+
+def _require_integer_argument(value: int | float, name: str) -> int:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    raise ValueError(f"{name} expects integer arguments, got {value}.")
+
+
+def _safe_factorial(args, _, __):
+    n = _require_integer_argument(args[0], "factorial")
+    if n < 0:
+        raise ValueError(f"factorial is undefined for negative input {n}.")
+    return math.factorial(n)
+
+
+def _safe_perm(args, _, __):
+    n = _require_integer_argument(args[0], "perm")
+    k = _require_integer_argument(args[1], "perm")
+    if n < 0 or k < 0:
+        raise ValueError(f"perm is undefined for negative inputs ({n}, {k}).")
+    if k > n:
+        raise ValueError(f"perm is undefined when k > n ({k} > {n}).")
+    return math.perm(n, k)
+
+
+def _safe_comb(args, _, __):
+    n = _require_integer_argument(args[0], "comb")
+    k = _require_integer_argument(args[1], "comb")
+    if n < 0 or k < 0:
+        raise ValueError(f"comb is undefined for negative inputs ({n}, {k}).")
+    if k > n:
+        raise ValueError(f"comb is undefined when k > n ({k} > {n}).")
+    return math.comb(n, k)
 
 # Latin letters and their relative preferences
 latin_chars = {
@@ -325,21 +366,15 @@ FUNCTIONS = {
         args[0]
     ),
     MathFunction("abs", functional_parameters=1): lambda args, _, __: abs(args[0]),
-    MathFunction(
-        "factorial", functional_parameters=1
-    ): lambda args, _, __: math.factorial(int(args[0])),
+    MathFunction("factorial", functional_parameters=1): _safe_factorial,
     MathFunction(
         "gcd", functional_parameters=2, functional_min_parameters=2
     ): lambda args, _, __: math.gcd(*[int(a) for a in args]),
     MathFunction(
         "lcm", functional_parameters=2, functional_min_parameters=2
     ): lambda args, _, __: math.lcm(*[int(a) for a in args]),
-    MathFunction("perm", functional_parameters=2): lambda args, _, __: math.perm(
-        int(args[0]), int(args[1])
-    ),
-    MathFunction("comb", functional_parameters=2): lambda args, _, __: math.comb(
-        int(args[0]), int(args[1])
-    ),
+    MathFunction("perm", functional_parameters=2): _safe_perm,
+    MathFunction("comb", functional_parameters=2): _safe_comb,
     # Statistical Functions
     # MathFunction(
     #     "mean", functional_parameters=20, functional_min_parameters=1
@@ -396,6 +431,11 @@ def generate_random_expression(
     allow_zero=True,
     require_integer=False,
     allow_functions=True,
+    allow_calculus=False,
+    allow_definite_integrals=True,
+    max_derivative_order=2,
+    difficulty: str = "intermediate",
+    guarantee_solvable: bool = False,
     context: ExpressionContext = ExpressionContext(),
 ):
     """
@@ -422,6 +462,96 @@ def generate_random_expression(
                 require_integer=require_integer,
             )
         return Symbol(variable_name)
+
+    def generate_solvable_calculus_inner(variable: Symbol):
+        mode = random.choice(["poly", "poly_plus_const", "sin", "cos", "exp", "linear"])
+        if mode == "poly":
+            exponent = random.randint(1, 5)
+            coefficient = generate_number(
+                mean=3,
+                std=2,
+                exponent=1.2,
+                negative_probability=negative_probability,
+                decimal_probability=0.95,
+                allow_negative=allow_negative,
+                allow_zero=False,
+                require_integer=True,
+            )
+            return product([coefficient, power(variable, exponent)])
+        if mode == "poly_plus_const":
+            exponent = random.randint(1, 4)
+            return sum(
+                [
+                    product(
+                        [
+                            generate_number(
+                                mean=3,
+                                std=2,
+                                exponent=1.2,
+                                negative_probability=negative_probability,
+                                decimal_probability=0.95,
+                                allow_negative=allow_negative,
+                                allow_zero=False,
+                                require_integer=True,
+                            ),
+                            power(variable, exponent),
+                        ]
+                    ),
+                    generate_number(
+                        mean=2,
+                        std=1,
+                        exponent=1.2,
+                        negative_probability=negative_probability,
+                        decimal_probability=0.95,
+                        allow_negative=allow_negative,
+                        allow_zero=True,
+                        require_integer=True,
+                    ),
+                ]
+            )
+        if mode == "sin":
+            return FunctionCall(MathFunction("sin", 1), [variable])
+        if mode == "cos":
+            return FunctionCall(MathFunction("cos", 1), [variable])
+        if mode == "exp":
+            return FunctionCall(MathFunction("exp", 1), [variable])
+        return sum(
+            [
+                product(
+                    [
+                        generate_number(
+                            mean=2,
+                            std=1,
+                            exponent=1.2,
+                            negative_probability=negative_probability,
+                            decimal_probability=0.95,
+                            allow_negative=allow_negative,
+                            allow_zero=False,
+                            require_integer=True,
+                        ),
+                        variable,
+                    ]
+                ),
+                generate_number(
+                    mean=2,
+                    std=1,
+                    exponent=1.2,
+                    negative_probability=negative_probability,
+                    decimal_probability=0.95,
+                    allow_negative=allow_negative,
+                    allow_zero=True,
+                    require_integer=True,
+                ),
+            ]
+        )
+
+    difficulty = (difficulty or "intermediate").lower()
+    if difficulty not in ("beginner", "intermediate", "advanced"):
+        difficulty = "intermediate"
+    if difficulty == "beginner":
+        max_depth = min(max_depth, 3)
+    elif difficulty == "advanced":
+        max_depth = max(max_depth, 6)
 
     # Base case for recursion
     p = 0.3 + 0.7 * (_depth / max_depth)
@@ -455,24 +585,40 @@ def generate_random_expression(
         "allow_negative": allow_negative,
         "allow_zero": allow_zero,
         "require_integer": require_integer,
+        "allow_functions": allow_functions,
+        "allow_calculus": allow_calculus,
+        "allow_definite_integrals": allow_definite_integrals,
+        "max_derivative_order": max_derivative_order,
+        "difficulty": difficulty,
+        "guarantee_solvable": guarantee_solvable,
         "context": context,
     }
 
     # Decide the type of expression to generate
     choices = ["sum", "product", "power", "function"]
     weights = [4, 3, 1, 0.5]  # Adjust weights as needed
+    if allow_calculus:
+        choices.extend(["derivative", "integral"])
+        weights.extend([0.4, 0.35])
     if not allow_functions:
         choices.remove("function")
-        weights = weights[:-1]
+        weights = [weights[i] for i, c in enumerate(choices) if c != "function"]
+        choices = [c for c in choices if c != "function"]
     expr_type = random.choices(choices, weights=weights, k=1)[0]
 
     if expr_type == "sum":
-        num_terms = generate_weighted_random_int(2, 15)
+        max_terms = (
+            8 if difficulty == "beginner" else (10 if difficulty == "intermediate" else 12)
+        )
+        num_terms = generate_weighted_random_int(2, max_terms)
         terms = [generate_random_expression(**recursive_args) for _ in range(num_terms)]
         return Sum(terms)
 
     elif expr_type == "product":
-        num_factors = generate_weighted_random_int(2, 15)
+        max_factors = (
+            6 if difficulty == "beginner" else (8 if difficulty == "intermediate" else 10)
+        )
+        num_factors = generate_weighted_random_int(2, max_factors)
         factors = [
             generate_random_expression(**recursive_args) for _ in range(num_factors)
         ]
@@ -480,7 +626,7 @@ def generate_random_expression(
 
     elif expr_type == "power":
         base = generate_random_expression(**recursive_args)
-        evaluated_base, _ = evaluate(base)
+        evaluated_base, _ = evaluate(base, error_on_invalid_snap=False)
         exponent_args = recursive_args.copy()
         if isinstance(evaluated_base, (int, float)):
             if evaluated_base < 0:
@@ -489,6 +635,16 @@ def generate_random_expression(
                 exponent_args["allow_negative"] = False
         exponent_args["decimal_probability"] = 0.9
         exponent = generate_random_expression(**exponent_args)
+        evaluated_exponent, _ = evaluate(exponent, error_on_invalid_snap=False)
+        if isinstance(evaluated_exponent, (int, float)):
+            if abs(evaluated_exponent) > 32:
+                evaluated_exponent = 32 if evaluated_exponent > 0 else -32
+            if (
+                isinstance(evaluated_exponent, float)
+                and evaluated_exponent.is_integer()
+            ):
+                evaluated_exponent = int(evaluated_exponent)
+            exponent = evaluated_exponent
         return Power(base, exponent)
 
     elif expr_type == "function":
@@ -519,6 +675,67 @@ def generate_random_expression(
         ]
 
         return FunctionCall(func_def, functional_args, subscript_args, superscript_args)
+
+    elif expr_type == "derivative":
+        if len(context.taken) == 0:
+            variable = get_variable()
+        else:
+            variable = Symbol(random.choice(list(context.taken)))
+        if guarantee_solvable:
+            inner = generate_solvable_calculus_inner(variable)
+        else:
+            derivative_args = recursive_args.copy()
+            derivative_args["allow_calculus"] = False
+            inner = generate_random_expression(**derivative_args)
+        if random.random() < 0.35 and len(context.taken) > 1:
+            variable2 = Symbol(random.choice(list(context.taken)))
+            while variable2.name == variable.name and len(context.taken) > 1:
+                variable2 = Symbol(random.choice(list(context.taken)))
+            return partial_derivative(
+                inner,
+                [
+                    (variable, random.randint(1, max_derivative_order)),
+                    (variable2, 1),
+                ],
+            )
+        return derivative(inner, variable, random.randint(1, max_derivative_order))
+
+    elif expr_type == "integral":
+        if len(context.taken) == 0:
+            variable = get_variable()
+        else:
+            variable = Symbol(random.choice(list(context.taken)))
+        if guarantee_solvable:
+            inner = generate_solvable_calculus_inner(variable)
+        else:
+            integral_args = recursive_args.copy()
+            integral_args["allow_calculus"] = False
+            inner = generate_random_expression(**integral_args)
+        if allow_definite_integrals and random.random() < 0.45:
+            lower = generate_number(
+                mean=mean,
+                std=std,
+                exponent=gen_exponent,
+                negative_probability=negative_probability,
+                decimal_probability=decimal_probability,
+                allow_negative=allow_negative,
+                allow_zero=allow_zero,
+                require_integer=require_integer,
+            )
+            upper = generate_number(
+                mean=mean,
+                std=std,
+                exponent=gen_exponent,
+                negative_probability=negative_probability,
+                decimal_probability=decimal_probability,
+                allow_negative=allow_negative,
+                allow_zero=allow_zero,
+                require_integer=require_integer,
+            )
+            if is_int_or_float(lower) and is_int_or_float(upper) and lower > upper:
+                lower, upper = upper, lower
+            return integral(inner, variable, lower, upper)
+        return integral(inner, variable)
 
 
 if __name__ == "__main__":
