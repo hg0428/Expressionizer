@@ -3,7 +3,6 @@ import inspect
 import math
 import sys
 from dataclasses import dataclass
-from decimal import Decimal
 from typing import Optional, Union
 
 from .expression import (
@@ -20,6 +19,7 @@ from .expression import (
     product,
     sum,
 )
+from .number_format import to_trimmed_decimal_string
 from .render import render_latex, render_type
 
 
@@ -44,7 +44,6 @@ from expressionizer.expression import (
     is_int_or_float,
 )
 from expressionizer.render import render_latex, render_type
-from decimal import Decimal
 import inspect
 
 
@@ -445,17 +444,7 @@ def get_coefficient_exponent(x):
     sign = -1 if x < 0 else 1
     x = abs(x)
 
-    # Convert to string to handle float or int accurately
-    s = f"{x:.15g}"  # Prevent float artifacts
-    if "." in s:
-        # Remove trailing zeros
-        s = s.rstrip("0").rstrip(".")
-    if "e" in s or "E" in s:
-        # Handle scientific notation directly
-        coeff_str, exp_str = s.lower().split("e")
-        coeff = int(coeff_str.replace(".", ""))
-        exp = int(exp_str) - (len(coeff_str.split(".")[-1]) if "." in coeff_str else 0)
-        return sign * coeff, exp
+    s = to_trimmed_decimal_string(x)
 
     # If decimal present, move decimal to integer and count how many places moved
     if "." in s:
@@ -489,7 +478,7 @@ def render_number_with_power_of_ten(number: int | float) -> str:
 
 
 def decompose_number(n):
-    s = str(format(Decimal(str(n)), "f")).replace("-", "")
+    s = to_trimmed_decimal_string(abs(n))
     sign = -1 if n < 0 else 1
     if "." in s:
         int_part, frac_part = s.split(".")
@@ -498,13 +487,19 @@ def decompose_number(n):
     result = []
     # Integer part
     for i, digit in enumerate(int_part):
+        if digit == "0":
+            continue
         power = len(int_part) - i - 1
         value = int(digit) * (10**power) * sign
         result.append(value)
     # Fractional part
     for i, digit in enumerate(frac_part):
-        value = int(digit) * (10 ** -(i + 1)) * sign
+        if digit == "0":
+            continue
+        value = float(f"{digit}e-{i + 1}") * sign
         result.append(value)
+    if len(result) == 0:
+        return [0]
     return result
 
 
@@ -529,7 +524,7 @@ def solve_sum(components, context: EvaluatorContext):
         return s + "0" * (width - len(s))
 
     # ---------- build aligned block ----------
-    parts = [split_parts(str(format(Decimal(str(x)), "f"))) for x in components]
+    parts = [split_parts(to_trimmed_decimal_string(x)) for x in components]
     left_max = max(len(a) for sign, a, b in parts)
     right_max = max(len(b) for _, _, b in parts)
     has_decimal = right_max > 0
@@ -611,6 +606,8 @@ def solve_sum(components, context: EvaluatorContext):
 
         # keep your step text shape
         if p is not None:
+            if sum_values == 0 and carry == 0 and len(values) > 1:
+                continue
             if len(values) > 1:
                 step = f"$10^{{{p}}}$: ${' + '.join(map(str, values))} = {sum_values}$"
             else:

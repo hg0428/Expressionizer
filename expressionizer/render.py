@@ -1,5 +1,6 @@
 import math
 from .expression import *
+from .number_format import to_trimmed_decimal_string
 
 
 @dataclass
@@ -44,7 +45,7 @@ def render(expression: Union[Numerical, Equation, InEquality], group=False):
         case int() | float():
             if expression == math.pi:
                 return "π"
-            return str(expression)
+            return to_trimmed_decimal_string(expression)
         case Power(base, exponent) if (
             isinstance(expression.exponent, int)
             or isinstance(expression.exponent, float)
@@ -139,7 +140,7 @@ def render_latex(
         case int() | float():
             if expression == math.pi:
                 return "\\pi"
-            return str(expression)
+            return to_trimmed_decimal_string(expression)
         case complex():
             return f"({expression.real} + {expression.imag}i)"
         case Power(base, exponent) if (
