@@ -2,6 +2,7 @@ from math import cos, exp, isclose, log, log10, pi, sin, sqrt, tan
 import random
 
 from .evaluator import (
+    CalculatorModeOptions,
     EvaluatorContext,
     EvaluatorOptions,
     WordingOptions,
@@ -9,8 +10,11 @@ from .evaluator import (
     evaluate_expression,
 )
 from .expression import *
+from .equation_generation import generate_random_equation_problem
 from .render import render_latex
 from .procedural import FUNCTIONS, ExpressionContext, generate_random_expression
+from .solve_equation import EquationWordingOptions, solve_equation, solve_system
+from .validation import validate_equation_solution, validate_system_solution
 
 
 def _is_numeric(x):
@@ -232,6 +236,59 @@ def run_options_tests():
     rendered_steps = ctx_wording.render()
     tests.append(("wording override", "CUSTOM DECOMPOSE MESSAGE" in rendered_steps))
 
+    # Step-heading customization should apply to evaluator render output.
+    heading_wording = WordingOptions(step_heading_template="### Phase {number}")
+    heading_expr = Sum([2, 3, 4])
+    heading_ctx = EvaluatorContext(
+        heading_expr,
+        options=EvaluatorOptions(wording_options=heading_wording),
+        error_on_invalid_snap=False,
+    )
+    _ = evaluate_expression(heading_expr, heading_ctx)
+    tests.append(("step heading override", "### Phase 1" in heading_ctx.render()))
+
+    # Calculator mode should short-circuit long numeric arithmetic and support custom templates.
+    calculator_options = EvaluatorOptions(
+        calculator_mode=CalculatorModeOptions(
+            enabled=True,
+            multiplication_operand_complexity_threshold=2,
+            result_complexity_threshold=2,
+            template="TOOL_CALL::{operation}::{expression}::{result}",
+        )
+    )
+    calculator_expr = Product([1234, 5678])
+    calculator_ctx = EvaluatorContext(
+        calculator_expr,
+        options=calculator_options,
+        error_on_invalid_snap=False,
+    )
+    calculator_result = evaluate_expression(calculator_expr, calculator_ctx)
+    calculator_rendered = calculator_ctx.render()
+    tests.append(("calculator mode computes multiplication", _equal_result(calculator_result, 1234 * 5678)))
+    tests.append(("calculator mode custom template rendered", "TOOL_CALL::multiplication::" in calculator_rendered))
+
+    # Power-specific calculator threshold should avoid full expansion for large numeric powers.
+    power_calc_options = EvaluatorOptions(
+        calculator_mode=CalculatorModeOptions(
+            enabled=True,
+            power_base_complexity_threshold=1,
+            power_exponent_complexity_threshold=1,
+            result_complexity_threshold=3,
+            template="CALC::{operation}::{expression}::{result}",
+        ),
+        expand_powers=True,
+        expand_power_limit=100,
+    )
+    power_expr = power(12, 8)
+    power_ctx = EvaluatorContext(
+        power_expr,
+        options=power_calc_options,
+        error_on_invalid_snap=False,
+    )
+    power_result = evaluate_expression(power_expr, power_ctx)
+    tests.append(("calculator mode computes power", _equal_result(power_result, 12**8)))
+    tests.append(("calculator mode power template rendered", "CALC::power::" in power_ctx.render()))
+
     return tests
 
 
@@ -430,6 +487,7 @@ def run_explanation_quality_tests():
     tests.append(("rendered explanation not empty", len(rendered.strip()) > 0))
     tests.append(("rendered explanation has structure", len(rendered.strip()) > 0))
     tests.append(("rendered explanation has no literal None", "None" not in rendered))
+    tests.append(("rendered explanation has no + - artifact", "+ -" not in rendered))
     tests.append(("events have non-empty rule ids", all(e.rule_id for e in ctx.explanation_events)))
     tests.append(
         (
@@ -535,6 +593,154 @@ def run_procedural_profile_tests():
     return tests
 
 
+def run_equation_solver_tests():
+    tests = []
+    x = Symbol("x")
+    y = Symbol("y")
+
+    # Single linear equation with unique numeric solution.
+    eq1 = equation(sum([product([2, x]), 3]), 11)
+    sol1, ctx1 = solve_equation(eq1)
+    tests.append(("single equation status exact", sol1.status == "exact"))
+    tests.append(("single equation x value", _equal_result(sol1.values.get("x"), 4)))
+    tests.append(("single equation has explanation", len(ctx1.render().strip()) > 0))
+    tests.append(("single equation explanation operation-explicit", "Subtract the right-hand side" in ctx1.render()))
+    tests.append(("single equation explanation no + - artifact", "+ -" not in ctx1.render()))
+    sym1 = validate_equation_solution(eq1, sol1.values)
+    tests.append(("single equation sympy equivalent", sym1.get("status") == "equivalent"))
+
+    # Multi-variable equation solved for specified variable.
+    eq2 = equation(sum([x, product([2, y]), -7]), 0)
+    sol2, _ = solve_equation(eq2, variable="x")
+    tests.append(("symbolic isolate status partial", sol2.status == "partial"))
+    x_expr = sol2.values.get("x")
+    tests.append(("symbolic isolate returns expression", x_expr is not None and not _is_numeric(x_expr)))
+    if x_expr is not None:
+        solved_expr, _ = evaluate(x_expr, substitutions={"y": 5}, error_on_invalid_snap=False)
+        tests.append(("symbolic isolate evaluates correctly", _equal_result(solved_expr, -3)))
+    else:
+        tests.append(("symbolic isolate evaluates correctly", False))
+
+    # Linear system with unique solution.
+    system = system_of_equations(
+        [
+            equation(sum([product([2, x]), y]), 5),
+            equation(sum([x, product([-1, y])]), 1),
+        ]
+    )
+    system_sol, system_ctx = solve_system(system)
+    tests.append(("system status exact", system_sol.status == "exact"))
+    tests.append(("system x value", _equal_result(system_sol.values.get("x"), 2)))
+    tests.append(("system y value", _equal_result(system_sol.values.get("y"), 1)))
+    tests.append(("system explanation not empty", len(system_ctx.render().strip()) > 0))
+    tests.append(("system explanation includes augmented matrix", "augmented matrix" in system_ctx.render()))
+    tests.append(("system explanation no + - artifact", "+ -" not in system_ctx.render()))
+    sym_system = validate_system_solution(system, system_sol.values)
+    tests.append(("system sympy equivalent", sym_system.get("status") == "equivalent"))
+
+    # Degenerate equation: no solutions.
+    no_sol_eq = equation(x, sum([x, 1]))
+    no_sol, _ = solve_equation(no_sol_eq, variable="x")
+    tests.append(("no-solution equation status unsolved", no_sol.status == "unsolved"))
+    tests.append(("no-solution reason code", no_sol.reason_code == "no_solution"))
+
+    # Native quadratic with two real roots.
+    quad_eq = equation(sum([power(x, 2), product([-5, x]), 6]), 0)
+    quad_sol, quad_ctx = solve_equation(quad_eq, variable="x")
+    tests.append(("quadratic status exact", quad_sol.status == "exact"))
+    quad_roots = quad_sol.values.get("x")
+    tests.append(("quadratic roots list", isinstance(quad_roots, list) and len(quad_roots) == 2))
+    if isinstance(quad_roots, list) and len(quad_roots) == 2:
+        tests.append(("quadratic root1", _equal_result(quad_roots[0], 2)))
+        tests.append(("quadratic root2", _equal_result(quad_roots[1], 3)))
+    else:
+        tests.append(("quadratic root1", False))
+        tests.append(("quadratic root2", False))
+    tests.append(("quadratic explanation not empty", len(quad_ctx.render().strip()) > 0))
+    quad_sym = validate_equation_solution(quad_eq, quad_sol.values)
+    tests.append(("quadratic sympy equivalent", quad_sym.get("status") == "equivalent"))
+
+    # Native quadratic with no real roots.
+    quad_no_real = equation(sum([power(x, 2), 1]), 0)
+    quad_no_real_sol, _ = solve_equation(quad_no_real, variable="x")
+    tests.append(("quadratic no-real status unsolved", quad_no_real_sol.status == "unsolved"))
+    tests.append(("quadratic no-real reason", quad_no_real_sol.reason_code == "no_real_solution"))
+
+    # Native rational reducible to linear: (x + 3) / x = 2 -> x = 3, x != 0.
+    rational_eq = equation(product([sum([x, 3]), power(x, -1)]), 2)
+    rational_sol, rational_ctx = solve_equation(rational_eq, variable="x")
+    tests.append(("rational status exact", rational_sol.status == "exact"))
+    tests.append(("rational solution x", _equal_result(rational_sol.values.get("x"), 3)))
+    tests.append(("rational explanation not empty", len(rational_ctx.render().strip()) > 0))
+    rational_sym = validate_equation_solution(rational_eq, rational_sol.values)
+    tests.append(("rational sympy equivalent", rational_sym.get("status") == "equivalent"))
+
+    # Domain exclusion path: 2/x = 0 has no real solution.
+    rational_no_sol = equation(product([2, power(x, -1)]), 0)
+    rational_no_sol_solution, _ = solve_equation(rational_no_sol, variable="x")
+    tests.append(("rational no-solution status unsolved", rational_no_sol_solution.status == "unsolved"))
+    tests.append(
+        (
+            "rational no-solution reason",
+            rational_no_sol_solution.reason_code in ("no_solution", "no_solution_domain_restriction"),
+        )
+    )
+
+    # Equation step-heading customization should apply to equation contexts.
+    custom_eq_wording = EquationWordingOptions(step_heading_template="### Phase {number}")
+    custom_sol, custom_ctx = solve_equation(eq1, wording_options=custom_eq_wording)
+    tests.append(("equation heading override solved", custom_sol.status == "exact"))
+    tests.append(("equation heading override text", "### Phase 1" in custom_ctx.render()))
+
+    # Fractional linear result should include exact and approximate forms by default.
+    eq_fraction = equation(sum([26, product([6, x])]), sum([-27, product([-20, x])]))
+    fraction_sol, fraction_ctx = solve_equation(eq_fraction, variable="x")
+    tests.append(("fractional linear status exact", fraction_sol.status == "exact"))
+    tests.append(("fractional linear exact value", _equal_result(fraction_sol.values.get("x"), -53 / 26)))
+    tests.append(("fractional linear explanation shows approx", "\\approx" in fraction_ctx.render()))
+
+    return tests
+
+
+def run_equation_procedural_tests():
+    random.seed(4242)
+    tests = []
+    total = 80
+    no_crash = True
+    sympy_equivalent = 0
+    produced_system = 0
+    produced_equation = 0
+    for _ in range(total):
+        try:
+            problem, variables, kind = generate_random_equation_problem(
+                difficulty=random.choice(["beginner", "intermediate", "advanced"]),
+                mode="mixed",
+            )
+            if kind in ("equation", "quadratic_equation", "rational_equation"):
+                produced_equation += 1
+                solution, _ = solve_equation(problem, variable=variables[0])
+                if solution.values:
+                    check = validate_equation_solution(problem, solution.values)
+                    if check.get("status") == "equivalent":
+                        sympy_equivalent += 1
+            else:
+                produced_system += 1
+                solution, _ = solve_system(problem, variables=variables)
+                if solution.values:
+                    check = validate_system_solution(problem, solution.values)
+                    if check.get("status") == "equivalent":
+                        sympy_equivalent += 1
+        except Exception:
+            no_crash = False
+            break
+
+    tests.append(("equation procedural no crashes", no_crash))
+    tests.append(("equation procedural generated equation cases", produced_equation > 0))
+    tests.append(("equation procedural generated system cases", produced_system > 0))
+    tests.append(("equation procedural sympy equivalence count", sympy_equivalent >= int(total * 0.6)))
+    return tests
+
+
 if __name__ == "__main__":
     total, failures = run_evaluate_tests()
     option_results = run_options_tests()
@@ -543,6 +749,8 @@ if __name__ == "__main__":
     explanation_quality_results = run_explanation_quality_tests()
     fuzz_results = run_procedural_fuzz_tests()
     profile_results = run_procedural_profile_tests()
+    equation_solver_results = run_equation_solver_tests()
+    equation_procedural_results = run_equation_procedural_tests()
 
     print("Expressionizer test suite")
     print("=" * 26)
@@ -596,6 +804,21 @@ if __name__ == "__main__":
     for name, ok in profile_results:
         print(f"- {name}: {'PASS' if ok else 'FAIL'}")
 
+    passed_equation_solver = sum(1 for _, ok in equation_solver_results if ok)
+    print(
+        f"Equation solver tests: {passed_equation_solver}/{len(equation_solver_results)} passed"
+    )
+    for name, ok in equation_solver_results:
+        print(f"- {name}: {'PASS' if ok else 'FAIL'}")
+
+    passed_equation_procedural = sum(1 for _, ok in equation_procedural_results if ok)
+    print(
+        "Equation procedural tests: "
+        + f"{passed_equation_procedural}/{len(equation_procedural_results)} passed"
+    )
+    for name, ok in equation_procedural_results:
+        print(f"- {name}: {'PASS' if ok else 'FAIL'}")
+
     if (
         failures
         or passed_options != len(option_results)
@@ -604,5 +827,7 @@ if __name__ == "__main__":
         or passed_explanation != len(explanation_quality_results)
         or passed_fuzz != len(fuzz_results)
         or passed_profiles != len(profile_results)
+        or passed_equation_solver != len(equation_solver_results)
+        or passed_equation_procedural != len(equation_procedural_results)
     ):
         raise SystemExit(1)

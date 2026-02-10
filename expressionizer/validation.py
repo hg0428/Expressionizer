@@ -1,8 +1,19 @@
 import math
+import itertools
 from typing import Any
 
 from .evaluator import contains, replace_sub
-from .expression import Derivative, FunctionCall, Integral, Power, Product, Sum, Symbol
+from .expression import (
+    Derivative,
+    Equation,
+    FunctionCall,
+    Integral,
+    Power,
+    Product,
+    Sum,
+    Symbol,
+    SystemOfEquations,
+)
 from .render import render_latex
 
 try:
@@ -24,6 +35,46 @@ def _sympy_num(value: int | float):
 
 
 def _map_function(name: str):
+    def _is_int_number(value) -> bool:
+        return bool(
+            getattr(value, "is_number", False)
+            and getattr(value, "is_real", False)
+            and getattr(value, "is_integer", False)
+        )
+
+    def _to_int(value) -> int:
+        return int(value)
+
+    def _safe_gcd(*args):
+        if all(_is_int_number(arg) for arg in args):
+            ints = [_to_int(arg) for arg in args]
+            return sp.Integer(math.gcd(*ints))
+        return sp.Function("gcd_native")(*args)
+
+    def _safe_lcm(*args):
+        if all(_is_int_number(arg) for arg in args):
+            ints = [_to_int(arg) for arg in args]
+            return sp.Integer(math.lcm(*ints))
+        return sp.Function("lcm_native")(*args)
+
+    def _safe_perm(n, k):
+        if _is_int_number(n) and _is_int_number(k):
+            n_i = _to_int(n)
+            k_i = _to_int(k)
+            if n_i < 0 or k_i < 0 or k_i > n_i:
+                return sp.nan
+            return sp.Integer(math.perm(n_i, k_i))
+        return sp.Function("perm_native")(n, k)
+
+    def _safe_comb(n, k):
+        if _is_int_number(n) and _is_int_number(k):
+            n_i = _to_int(n)
+            k_i = _to_int(k)
+            if n_i < 0 or k_i < 0 or k_i > n_i:
+                return sp.nan
+            return sp.Integer(math.comb(n_i, k_i))
+        return sp.Function("comb_native")(n, k)
+
     mapping = {
         "sin": sp.sin,
         "cos": sp.cos,
@@ -51,19 +102,57 @@ def _map_function(name: str):
         "sqrt": sp.sqrt,
         "ceil": sp.ceiling,
         "floor": sp.floor,
-        "trunc": lambda x: sp.Integer(x) if getattr(x, "is_integer", False) else sp.floor(x),
+        "trunc": lambda x: sp.sign(x) * sp.floor(sp.Abs(x)),
         "abs": sp.Abs,
         "factorial": sp.factorial,
-        "gcd": sp.gcd,
-        "lcm": sp.lcm,
-        "perm": lambda n, k: sp.factorial(n) / sp.factorial(n - k),
-        "comb": sp.binomial,
+        "gcd": _safe_gcd,
+        "lcm": _safe_lcm,
+        "perm": _safe_perm,
+        "comb": _safe_comb,
         "gamma": sp.gamma,
         "lgamma": sp.loggamma,
         "erf": sp.erf,
         "erfc": sp.erfc,
     }
     return mapping.get(name)
+
+
+def _evaluate_native_function_symbols(expr):
+    if sp is None:
+        return expr
+
+    def _is_int_number(value) -> bool:
+        return bool(
+            getattr(value, "is_number", False)
+            and getattr(value, "is_real", False)
+            and getattr(value, "is_integer", False)
+        )
+
+    def _replace(expr_in, fn_name: str, evaluator):
+        return expr_in.replace(
+            lambda e: getattr(e, "is_Function", False)
+            and getattr(getattr(e, "func", None), "__name__", "") == fn_name
+            and all(_is_int_number(arg) for arg in getattr(e, "args", [])),
+            lambda e: evaluator(*[int(arg) for arg in e.args]),
+        )
+
+    expr = _replace(expr, "gcd_native", lambda *args: sp.Integer(math.gcd(*args)))
+    expr = _replace(expr, "lcm_native", lambda *args: sp.Integer(math.lcm(*args)))
+    expr = _replace(
+        expr,
+        "perm_native",
+        lambda n, k: sp.Integer(math.perm(n, k))
+        if n >= 0 and k >= 0 and k <= n
+        else sp.nan,
+    )
+    expr = _replace(
+        expr,
+        "comb_native",
+        lambda n, k: sp.Integer(math.comb(n, k))
+        if n >= 0 and k >= 0 and k <= n
+        else sp.nan,
+    )
+    return expr
 
 
 def to_sympy(expr: Any):
@@ -116,6 +205,12 @@ def to_sympy(expr: Any):
         if expr.lower is not None and expr.upper is not None:
             return sp.integrate(inner, (symbol, to_sympy(expr.lower), to_sympy(expr.upper)))
         return sp.integrate(inner, symbol)
+    if isinstance(expr, Equation):
+        if len(expr.expressions) != 2:
+            raise ValueError("SymPy conversion currently supports two-sided equations only")
+        return sp.Eq(to_sympy(expr.expressions[0]), to_sympy(expr.expressions[1]))
+    if isinstance(expr, SystemOfEquations):
+        return [to_sympy(eq) for eq in expr.equations]
 
     raise TypeError(f"Unsupported expression type for sympy conversion: {type(expr)}")
 
@@ -150,7 +245,8 @@ def _complexity_info(expr: Any, max_nodes: int = 500) -> dict[str, Any]:
 
         current_id = id(current)
         if current_id in visited:
-            return {"ok": False, "reason": "cyclic_expression", "nodes": nodes}
+            # Shared subtrees are valid; skip re-visiting.
+            continue
         visited.add(current_id)
         nodes += 1
         if nodes > max_nodes:
@@ -226,6 +322,8 @@ def compare_with_sympy(
 
         lhs = sp.simplify(original_sym.subs(subs_map))
         rhs = sp.simplify(result_sym.subs(subs_map))
+        lhs = _evaluate_native_function_symbols(lhs)
+        rhs = _evaluate_native_function_symbols(rhs)
         diff = sp.simplify(lhs - rhs)
         if diff == 0:
             return {"status": "equivalent", "kind": "symbolic", "difference": "0"}
@@ -334,6 +432,14 @@ def validate_reasoning_steps(eval_context: Any, expected_result: Any) -> dict[st
                         "text": text,
                     }
                 )
+            if "+ -" in text:
+                failures.append(
+                    {
+                        "index": index,
+                        "type": "text_sign_artifact_plus_negative",
+                        "text": text,
+                    }
+                )
             continue
 
         if contains(snap.previous_tree, snap.original) <= 0:
@@ -381,6 +487,8 @@ def validate_reasoning_steps(eval_context: Any, expected_result: Any) -> dict[st
     rendered = eval_context.render()
     if "None" in rendered:
         failures.append({"type": "rendered_explanation_contains_none"})
+    if "+ -" in rendered:
+        failures.append({"type": "rendered_sign_artifact_plus_negative"})
 
     return {
         "valid": len(failures) == 0,
@@ -389,3 +497,101 @@ def validate_reasoning_steps(eval_context: Any, expected_result: Any) -> dict[st
         "notes": notes + ([final_tree_note] if final_tree_note is not None else []),
         "rendered_length": len(rendered),
     }
+
+
+def validate_equation_solution(
+    eq: Equation,
+    values: dict[str, Any],
+    tolerance: float = 1e-8,
+) -> dict[str, Any]:
+    if sp is None:
+        return {"status": "skipped", "reason": "sympy_unavailable"}
+    if len(eq.expressions) != 2:
+        return {"status": "inconclusive", "reason": "unsupported_equation_arity"}
+    try:
+        lhs = to_sympy(eq.expressions[0])
+        rhs = to_sympy(eq.expressions[1])
+
+        scalar_values: dict[str, Any] = {}
+        list_values: dict[str, list[Any]] = {}
+        for key, value in values.items():
+            if isinstance(value, (list, tuple, set)):
+                candidates = list(value)
+                if len(candidates) == 0:
+                    return {"status": "conflict", "reason": "empty_solution_set"}
+                list_values[key] = candidates
+            else:
+                scalar_values[key] = value
+
+        if not list_values:
+            candidate_maps = [values]
+        else:
+            keys = sorted(list_values.keys())
+            products = list(itertools.product(*[list_values[k] for k in keys]))
+            if len(products) > 32:
+                return {"status": "inconclusive", "reason": "solution_set_too_large"}
+            candidate_maps = []
+            for combo in products:
+                candidate = dict(scalar_values)
+                for key, value in zip(keys, combo):
+                    candidate[key] = value
+                candidate_maps.append(candidate)
+
+        details = []
+        for candidate_values in candidate_maps:
+            subs = _build_subs_map(candidate_values)
+            difference = sp.simplify(lhs.subs(subs) - rhs.subs(subs))
+            if difference == 0:
+                details.append({"status": "equivalent", "difference": "0", "values": candidate_values})
+                continue
+            if difference.is_number:
+                try:
+                    numeric_error = abs(float(difference))
+                except Exception:
+                    numeric_error = None
+                if numeric_error is not None and numeric_error <= tolerance:
+                    details.append(
+                        {
+                            "status": "equivalent",
+                            "difference": str(difference),
+                            "numeric_error": numeric_error,
+                            "values": candidate_values,
+                        }
+                    )
+                    continue
+            details.append({"status": "conflict", "difference": str(difference), "values": candidate_values})
+
+        if all(item.get("status") == "equivalent" for item in details):
+            return {"status": "equivalent", "details": details}
+        return {"status": "conflict", "details": details}
+    except Exception as exc:
+        return {
+            "status": "error",
+            "reason": "sympy_exception",
+            "exception_type": type(exc).__name__,
+            "exception_message": str(exc),
+        }
+
+
+def validate_system_solution(
+    system: SystemOfEquations | list[Equation],
+    values: dict[str, Any],
+    tolerance: float = 1e-8,
+) -> dict[str, Any]:
+    equations = system.equations if isinstance(system, SystemOfEquations) else system
+    details = []
+    for index, eq in enumerate(equations):
+        details.append(
+            {
+                "index": index,
+                **validate_equation_solution(eq, values, tolerance=tolerance),
+            }
+        )
+
+    if any(item.get("status") == "error" for item in details):
+        return {"status": "error", "details": details}
+    if any(item.get("status") == "conflict" for item in details):
+        return {"status": "conflict", "details": details}
+    if all(item.get("status") in ("equivalent", "skipped") for item in details):
+        return {"status": "equivalent", "details": details}
+    return {"status": "inconclusive", "details": details}

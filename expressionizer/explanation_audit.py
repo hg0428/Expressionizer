@@ -2,16 +2,24 @@ import argparse
 import json
 import multiprocessing as mp
 import random
+import signal
 import time
 import traceback
 from typing import Any
 
 import numpy as np
 
-from .evaluator import evaluate
+from .equation_generation import generate_random_equation_problem
+from .evaluator import EvaluatorOptions, WordingOptions, compact_evaluator_options, evaluate
 from .procedural import FUNCTIONS, ExpressionContext, generate_random_expression
 from .render import render_latex
-from .validation import compare_with_sympy, validate_reasoning_steps
+from .solve_equation import EquationWordingOptions, solve_equation, solve_system
+from .validation import (
+    compare_with_sympy,
+    validate_equation_solution,
+    validate_reasoning_steps,
+    validate_system_solution,
+)
 
 
 def _mp_context():
@@ -19,6 +27,31 @@ def _mp_context():
         return mp.get_context("fork")
     except ValueError:
         return mp.get_context("spawn")
+
+
+def _compare_with_sympy_timeout(
+    expr: Any,
+    answer: Any,
+    substitutions: dict[str, Any],
+    timeout_seconds: float = 2.0,
+) -> dict[str, Any]:
+    if timeout_seconds <= 0:
+        return compare_with_sympy(expr, answer, substitutions=substitutions)
+    if not hasattr(signal, "SIGALRM"):
+        return compare_with_sympy(expr, answer, substitutions=substitutions)
+
+    def _timeout_handler(_signum, _frame):
+        raise TimeoutError("SymPy comparison timed out.")
+
+    previous_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    try:
+        return compare_with_sympy(expr, answer, substitutions=substitutions)
+    except TimeoutError:
+        return {"status": "inconclusive", "reason": "sympy_timeout"}
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def _preview_substitutions(substitutions: dict[str, Any]) -> dict[str, str]:
@@ -30,6 +63,33 @@ def _preview_substitutions(substitutions: dict[str, Any]) -> dict[str, str]:
             except Exception:
                 preview[key] = str(value)
     return preview
+
+
+def _render_solution(values: dict[str, Any]) -> str:
+    if not values:
+        return "{}"
+    parts = []
+    for key in sorted(values):
+        try:
+            rendered = render_latex(values[key])
+        except Exception:
+            rendered = str(values[key])
+        parts.append(f"{key}={rendered}")
+    return "{ " + ", ".join(parts) + " }"
+
+
+def _build_eval_options(payload: dict[str, Any]) -> EvaluatorOptions:
+    wording_style = payload.get("wording_style", "verbose")
+    step_heading_template = payload.get("step_heading_template", "## Step {number}")
+    if payload.get("compact_explanations", False):
+        return compact_evaluator_options(
+            wording_style=wording_style,
+            step_heading_template=step_heading_template,
+        )
+    return EvaluatorOptions(
+        wording_style=wording_style,
+        wording_options=WordingOptions(step_heading_template=step_heading_template),
+    )
 
 
 def _audit_worker(payload: dict[str, Any], output_queue: Any):
@@ -44,35 +104,90 @@ def _audit_worker(payload: dict[str, Any], output_queue: Any):
     substitutions = None
     started_at = time.time()
     try:
-        expr = generate_random_expression(
-            max_depth=payload["max_depth"],
-            allow_calculus=payload["allow_calculus"],
-            allow_definite_integrals=payload["allow_definite_integrals"],
-            max_derivative_order=payload["max_derivative_order"],
-            difficulty=difficulty,
-            guarantee_solvable=guarantee_solvable,
-            context=context,
+        eval_options = _build_eval_options(payload)
+        equation_wording = EquationWordingOptions(
+            step_heading_template=payload.get("step_heading_template", "## Step {number}")
         )
-        substitutions = context.substitutions.copy()
-        substitutions.update(FUNCTIONS)
+        mode = payload.get("equation_mode", "expressions")
+        if mode in ("equations", "mixed") and (
+            mode == "equations" or random.random() < 0.5
+        ):
+            expr, variables, generated_kind = generate_random_equation_problem(
+                difficulty=difficulty,
+                mode="mixed",
+            )
+            if generated_kind in ("equation", "quadratic_equation", "rational_equation"):
+                solution, solve_context = solve_equation(
+                    expr,
+                    variable=variables[0],
+                    wording_options=equation_wording,
+                )
+                answer = solution.values
+                rendered = solve_context.render()
+                reasoning_check = {
+                    "valid": len(rendered.strip()) > 0 and "None" not in rendered,
+                    "failure_count": 0 if "None" not in rendered else 1,
+                    "failures": [] if "None" not in rendered else [{"type": "render_contains_none"}],
+                    "notes": [],
+                    "rendered_length": len(rendered),
+                }
+                sympy_check = (
+                    validate_equation_solution(expr, solution.values)
+                    if payload["sympy_compare"]
+                    else {"status": "skipped"}
+                )
+            else:
+                solution, solve_context = solve_system(
+                    expr,
+                    variables=variables,
+                    wording_options=equation_wording,
+                )
+                answer = solution.values
+                rendered = solve_context.render()
+                reasoning_check = {
+                    "valid": len(rendered.strip()) > 0 and "None" not in rendered,
+                    "failure_count": 0 if "None" not in rendered else 1,
+                    "failures": [] if "None" not in rendered else [{"type": "render_contains_none"}],
+                    "notes": [],
+                    "rendered_length": len(rendered),
+                }
+                sympy_check = (
+                    validate_system_solution(expr, solution.values)
+                    if payload["sympy_compare"]
+                    else {"status": "skipped"}
+                )
+        else:
+            expr = generate_random_expression(
+                max_depth=payload["max_depth"],
+                allow_calculus=payload["allow_calculus"],
+                allow_definite_integrals=payload["allow_definite_integrals"],
+                max_derivative_order=payload["max_derivative_order"],
+                difficulty=difficulty,
+                guarantee_solvable=guarantee_solvable,
+                generation_profile=payload.get("generation_profile", "realistic"),
+                context=context,
+            )
+            substitutions = context.substitutions.copy()
+            substitutions.update(FUNCTIONS)
 
-        answer, eval_context = evaluate(
-            expr,
-            substitutions=substitutions,
-            error_on_invalid_snap=False,
-        )
-        reasoning_check = validate_reasoning_steps(eval_context, answer)
-        sympy_check = (
-            compare_with_sympy(expr, answer, substitutions=substitutions)
-            if payload["sympy_compare"]
-            else {"status": "skipped"}
-        )
-        if eval_context.is_approximate and sympy_check.get("status") == "conflict":
-            sympy_check = {
-                **sympy_check,
-                "status": "inconclusive",
-                "reason": "approximation_enabled",
-            }
+            answer, eval_context = evaluate(
+                expr,
+                substitutions=substitutions,
+                error_on_invalid_snap=False,
+                options=eval_options,
+            )
+            reasoning_check = validate_reasoning_steps(eval_context, answer)
+            sympy_check = (
+                _compare_with_sympy_timeout(expr, answer, substitutions)
+                if payload["sympy_compare"]
+                else {"status": "skipped"}
+            )
+            if eval_context.is_approximate and sympy_check.get("status") == "conflict":
+                sympy_check = {
+                    **sympy_check,
+                    "status": "inconclusive",
+                    "reason": "approximation_enabled",
+                }
 
         output_queue.put(
             {
@@ -83,7 +198,9 @@ def _audit_worker(payload: dict[str, Any], output_queue: Any):
                 "guarantee_solvable": guarantee_solvable,
                 "duration_seconds": round(time.time() - started_at, 6),
                 "expression_latex": render_latex(expr),
-                "answer_latex": render_latex(answer),
+                "answer_latex": render_latex(answer)
+                if not isinstance(answer, dict)
+                else _render_solution(answer),
                 "reasoning_check": reasoning_check,
                 "sympy_check": sympy_check,
                 "substitutions": _preview_substitutions(context.substitutions),
@@ -186,8 +303,33 @@ def main() -> int:
     parser.add_argument("--allow-definite-integrals", action="store_true", default=True)
     parser.add_argument("--max-derivative-order", type=int, default=2)
     parser.add_argument("--sympy-compare", action="store_true", default=False)
+    parser.add_argument(
+        "--generation-profile",
+        choices=["realistic", "stress"],
+        default="realistic",
+    )
+    parser.add_argument(
+        "--equation-mode",
+        choices=["expressions", "equations", "mixed"],
+        default="expressions",
+    )
     parser.add_argument("--timeout-seconds", type=float, default=10.0)
     parser.add_argument("--report-every", type=int, default=20)
+    parser.add_argument(
+        "--wording-style",
+        choices=["verbose", "concise"],
+        default="verbose",
+    )
+    parser.add_argument(
+        "--compact-explanations",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--step-heading-template",
+        type=str,
+        default="## Step {number}",
+    )
     args = parser.parse_args()
 
     started = time.time()
@@ -195,6 +337,8 @@ def main() -> int:
     reasoning_failures = 0
     sympy_conflicts = 0
     sympy_inconclusive = 0
+    runtime_errors = 0
+    hangs = 0
 
     for index in range(args.cases):
         seed = args.base_seed + index
@@ -211,12 +355,19 @@ def main() -> int:
             "allow_definite_integrals": args.allow_definite_integrals,
             "max_derivative_order": args.max_derivative_order,
             "sympy_compare": args.sympy_compare,
+            "equation_mode": args.equation_mode,
+            "generation_profile": args.generation_profile,
+            "wording_style": args.wording_style,
+            "compact_explanations": args.compact_explanations,
+            "step_heading_template": args.step_heading_template,
         }
         result = _run_case_with_timeout(payload, args.timeout_seconds)
 
         if result["status"] == "hang":
+            hangs += 1
             failures.append({"type": "hang", **result})
         elif result["status"] == "error":
+            runtime_errors += 1
             failures.append({"type": "runtime_error", **result})
         else:
             reasoning_check = result["reasoning_check"]
@@ -236,6 +387,7 @@ def main() -> int:
             elapsed = round(time.time() - started, 3)
             print(
                 f"[audit] {completed}/{args.cases} completed, "
+                + f"runtime_errors={runtime_errors}, hangs={hangs}, "
                 + f"reasoning_failures={reasoning_failures}, "
                 + f"sympy_conflicts={sympy_conflicts}, "
                 + f"inconclusive={sympy_inconclusive}, elapsed={elapsed}s"
@@ -246,6 +398,8 @@ def main() -> int:
         "reasoning_failures": reasoning_failures,
         "sympy_conflicts": sympy_conflicts,
         "sympy_inconclusive": sympy_inconclusive,
+        "runtime_errors": runtime_errors,
+        "hangs": hangs,
         "total_failures": len(failures),
         "elapsed_seconds": round(time.time() - started, 3),
     }

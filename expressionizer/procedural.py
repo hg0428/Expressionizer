@@ -1,4 +1,4 @@
-from typing import Callable
+from typing import Callable, Literal
 from .evaluator import evaluate
 from .render import render_latex, render_type
 from .expression import (
@@ -436,6 +436,7 @@ def generate_random_expression(
     max_derivative_order=2,
     difficulty: str = "intermediate",
     guarantee_solvable: bool = False,
+    generation_profile: Literal["realistic", "stress"] = "realistic",
     context: ExpressionContext = ExpressionContext(),
 ):
     """
@@ -548,10 +549,15 @@ def generate_random_expression(
     difficulty = (difficulty or "intermediate").lower()
     if difficulty not in ("beginner", "intermediate", "advanced"):
         difficulty = "intermediate"
+    generation_profile = (generation_profile or "realistic").lower()
+    if generation_profile not in ("realistic", "stress"):
+        generation_profile = "realistic"
     if difficulty == "beginner":
         max_depth = min(max_depth, 3)
+    elif difficulty == "intermediate" and generation_profile == "realistic":
+        max_depth = min(max_depth, 4)
     elif difficulty == "advanced":
-        max_depth = max(max_depth, 6)
+        max_depth = max(max_depth, 6) if generation_profile == "stress" else min(max_depth, 5)
 
     # Base case for recursion
     p = 0.3 + 0.7 * (_depth / max_depth)
@@ -591,6 +597,7 @@ def generate_random_expression(
         "max_derivative_order": max_derivative_order,
         "difficulty": difficulty,
         "guarantee_solvable": guarantee_solvable,
+        "generation_profile": generation_profile,
         "context": context,
     }
 
@@ -607,17 +614,27 @@ def generate_random_expression(
     expr_type = random.choices(choices, weights=weights, k=1)[0]
 
     if expr_type == "sum":
-        max_terms = (
-            8 if difficulty == "beginner" else (10 if difficulty == "intermediate" else 12)
-        )
+        if generation_profile == "stress":
+            max_terms = (
+                8 if difficulty == "beginner" else (10 if difficulty == "intermediate" else 12)
+            )
+        else:
+            max_terms = (
+                5 if difficulty == "beginner" else (6 if difficulty == "intermediate" else 8)
+            )
         num_terms = generate_weighted_random_int(2, max_terms)
         terms = [generate_random_expression(**recursive_args) for _ in range(num_terms)]
         return Sum(terms)
 
     elif expr_type == "product":
-        max_factors = (
-            6 if difficulty == "beginner" else (8 if difficulty == "intermediate" else 10)
-        )
+        if generation_profile == "stress":
+            max_factors = (
+                6 if difficulty == "beginner" else (8 if difficulty == "intermediate" else 10)
+            )
+        else:
+            max_factors = (
+                4 if difficulty == "beginner" else (5 if difficulty == "intermediate" else 6)
+            )
         num_factors = generate_weighted_random_int(2, max_factors)
         factors = [
             generate_random_expression(**recursive_args) for _ in range(num_factors)
@@ -637,8 +654,14 @@ def generate_random_expression(
         exponent = generate_random_expression(**exponent_args)
         evaluated_exponent, _ = evaluate(exponent, error_on_invalid_snap=False)
         if isinstance(evaluated_exponent, (int, float)):
-            if abs(evaluated_exponent) > 32:
-                evaluated_exponent = 32 if evaluated_exponent > 0 else -32
+            if generation_profile == "stress":
+                exponent_cap = 32
+            else:
+                exponent_cap = (
+                    8 if difficulty == "beginner" else (10 if difficulty == "intermediate" else 12)
+                )
+            if abs(evaluated_exponent) > exponent_cap:
+                evaluated_exponent = exponent_cap if evaluated_exponent > 0 else -exponent_cap
             if (
                 isinstance(evaluated_exponent, float)
                 and evaluated_exponent.is_integer()

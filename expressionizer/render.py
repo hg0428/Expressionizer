@@ -1,4 +1,5 @@
 import math
+from numbers import Real
 from .expression import *
 from .number_format import to_trimmed_decimal_string
 
@@ -40,7 +41,73 @@ def apply_group(text, paren=False, square=False, curly=False):
         return text
 
 
-def render(expression: Union[Numerical, Equation, InEquality], group=False):
+def _split_signed_term(term):
+    if isinstance(term, Real) and not isinstance(term, bool):
+        if float(term) < 0:
+            return True, -term
+        return False, term
+    if isinstance(term, Product) and len(term.factors) > 0:
+        first = term.factors[0]
+        if isinstance(first, Real) and not isinstance(first, bool) and float(first) < 0:
+            abs_first = -first
+            remaining = list(term.factors[1:])
+            if abs_first == 1 and remaining:
+                if len(remaining) == 1:
+                    return True, remaining[0]
+                return True, product(remaining)
+            return True, product([abs_first] + remaining)
+    return False, term
+
+
+def _render_sum_with_signs(
+    terms: list[Numerical],
+    renderer,
+    group: bool = False,
+    apply_group_fn=None,
+    paren_group: bool = False,
+    square_group: bool = False,
+    curly_group: bool = False,
+):
+    flattened_terms = []
+
+    def _flatten(term):
+        if isinstance(term, Sum):
+            for nested in term.terms:
+                _flatten(nested)
+        else:
+            flattened_terms.append(term)
+
+    for term in terms:
+        _flatten(term)
+
+    if len(flattened_terms) == 0:
+        rendered = "0"
+    else:
+        parts: list[str] = []
+        for index, term in enumerate(flattened_terms):
+            rendered_term = renderer(term)
+            is_negative = rendered_term.startswith("-")
+            if is_negative:
+                abs_rendered = rendered_term[1:].lstrip()
+            else:
+                # Fallback to structural sign detection in case renderer did not include
+                # a literal leading '-' for a negative term representation.
+                structural_negative, abs_term = _split_signed_term(term)
+                is_negative = structural_negative
+                abs_rendered = renderer(abs_term)
+            if index == 0:
+                parts.append(("-" if is_negative else "") + abs_rendered)
+            else:
+                parts.append((" - " if is_negative else " + ") + abs_rendered)
+        rendered = "".join(parts)
+    if apply_group_fn is not None:
+        return apply_group_fn(rendered, paren_group, square_group, curly_group)
+    if group and len(flattened_terms) > 1:
+        return "(" + rendered + ")"
+    return rendered
+
+
+def render(expression: Union[Numerical, Equation, InEquality, SystemOfEquations], group=False):
     match expression:
         case int() | float():
             if expression == math.pi:
@@ -97,10 +164,11 @@ def render(expression: Union[Numerical, Equation, InEquality], group=False):
                     map(lambda factor: render(factor, True), expression.factors)
                 )
         case Sum():
-            if len(expression.terms) > 1 and group:
-                return "(" + " + ".join(map(render, expression.terms)) + ")"
-            else:
-                return " + ".join(map(render, expression.terms))
+            return _render_sum_with_signs(
+                expression.terms,
+                renderer=lambda term: render(term),
+                group=group,
+            )
         case FunctionCall():
             if len(expression.subscript_arguments) == 0:
                 subscript = ""
@@ -146,10 +214,13 @@ def render(expression: Union[Numerical, Equation, InEquality], group=False):
             return " = ".join(map(render, expression.expressions))
         case InEquality():
             return f"{render(expression.expression1)} {expression.sign} {render(expression.expression2)}"
+        case SystemOfEquations():
+            rendered_equations = [render(eq) for eq in expression.equations]
+            return "{ " + " ; ".join(rendered_equations) + " }"
 
 
 def render_latex(
-    expression: Union[Numerical, Equation, InEquality],
+    expression: Union[Numerical, Equation, InEquality, SystemOfEquations],
     renderOptions: LaTeXRenderOptions = LaTeXRenderOptions(),
     paren_group=False,
     square_group=False,
@@ -190,7 +261,16 @@ def render_latex(
             and exponent < 0
         ):
             # Root
-            root = base ** (-exponent)
+            try:
+                root = base ** (-exponent)
+            except OverflowError:
+                # Fallback to generic power rendering when root degree is too large.
+                return apply_group(
+                    f"{render_latex(value, renderOptions, True)}^{{({render_latex(base, renderOptions, True)})^{{{render_latex(-exponent, renderOptions, True)}}}}}",
+                    paren_group and renderOptions.group_exponentiation,
+                    square_group and renderOptions.group_exponentiation,
+                    curly_group and renderOptions.group_exponentiation,
+                )
             if root == 2:
                 return f"\\sqrt{{{render_latex(value, renderOptions)}}}"
             else:
@@ -271,17 +351,14 @@ def render_latex(
                     prev = factor
                 return result
         case Sum():
-            if len(expression.terms) > 1:
-                return apply_group(
-                    " + ".join(_render_or_fallback(term) for term in expression.terms),
-                    paren_group,
-                    square_group,
-                    curly_group,
-                )
-            else:
-                return " + ".join(
-                    _render_or_fallback(term) for term in expression.terms
-                )
+            return _render_sum_with_signs(
+                expression.terms,
+                renderer=lambda term: _render_or_fallback(term),
+                apply_group_fn=apply_group,
+                paren_group=paren_group,
+                square_group=square_group,
+                curly_group=curly_group,
+            )
         case FunctionCall():
             if len(expression.subscript_arguments) == 0:
                 subscript = ""
@@ -364,6 +441,9 @@ def render_latex(
             )
         case InEquality():
             return f"{render_latex(expression.expression1, renderOptions)} {expression.sign} {render_latex(expression.expression2, renderOptions)}"
+        case SystemOfEquations():
+            rows = [render_latex(eq, renderOptions) for eq in expression.equations]
+            return "\\left\\{\\begin{array}{l}" + " \\\\ ".join(rows) + "\\end{array}\\right."
         case _:
             return apply_group(
                 str(expression),

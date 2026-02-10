@@ -70,6 +70,24 @@ def round_sig(x, sig=2):
 class WordingOptions:
     templates: dict[str, str] = field(default_factory=dict)
     concise_templates: dict[str, str] = field(default_factory=dict)
+    step_heading_template: str = "## Step {number}"
+
+
+@dataclass
+class CalculatorModeOptions:
+    enabled: bool = True
+    addition_operand_complexity_threshold: int = 14
+    subtraction_operand_complexity_threshold: int = 14
+    multiplication_operand_complexity_threshold: int = 8
+    power_base_complexity_threshold: int = 5
+    power_exponent_complexity_threshold: int = 3
+    result_complexity_threshold: int = 28
+    template: str = (
+        "Use a calculator for this {operation}: $$ {expression} = {result} $$"
+    )
+    concise_template: str = "Calculator ({operation}): $$ {expression} = {result} $$"
+    operation_templates: dict[str, str] = field(default_factory=dict)
+    concise_operation_templates: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -146,6 +164,162 @@ class EvaluatorOptions:
     explanation_verbosity: Literal["minimal", "normal", "detailed"] = "normal"
     zero_power_zero_policy: Literal["undefined", "one", "zero"] = "undefined"
     overflow_policy: Literal["symbolic", "infinity", "zero"] = "symbolic"
+    calculator_mode: CalculatorModeOptions = field(default_factory=CalculatorModeOptions)
+
+
+def compact_evaluator_options(
+    wording_style: Literal["verbose", "concise"] = "concise",
+    step_heading_template: str = "## Step {number}",
+) -> EvaluatorOptions:
+    return EvaluatorOptions(
+        wording_style=wording_style,
+        wording_options=WordingOptions(step_heading_template=step_heading_template),
+        show_complexity_explanations=False,
+        show_decimal_shift_explanations=False,
+        show_multiplication_table=False,
+        show_addition_alignment_block=False,
+        show_place_value_steps=False,
+        show_addition_value_list=False,
+        explanation_verbosity="minimal",
+    )
+
+
+def _int_decimal_digits(value: int) -> int:
+    magnitude = abs(value)
+    if magnitude == 0:
+        return 1
+    try:
+        return len(str(magnitude))
+    except ValueError:
+        # Avoid Python's large-int string conversion guard for digit counting.
+        return int(magnitude.bit_length() * math.log10(2)) + 1
+
+
+def _numeric_complexity(value: int | float) -> int:
+    if isinstance(value, bool):
+        return 1
+    if isinstance(value, int):
+        return _int_decimal_digits(value)
+    if not isinstance(value, float):
+        return 0
+    if not math.isfinite(value):
+        return sys.maxsize
+    rendered = to_trimmed_decimal_string(abs(value))
+    lowered = rendered.lower()
+    if "e" in lowered:
+        coefficient, exponent_text = lowered.split("e", 1)
+        coefficient_digits = sum(ch.isdigit() for ch in coefficient)
+        try:
+            exponent = abs(int(exponent_text))
+        except ValueError:
+            exponent = 0
+        return coefficient_digits + exponent
+    return sum(ch.isdigit() for ch in rendered)
+
+
+def _estimate_power_result_complexity(base: int | float, exponent: int | float) -> Optional[int]:
+    if not is_int_or_float(base) or not is_int_or_float(exponent):
+        return None
+    if isinstance(exponent, float) and not exponent.is_integer():
+        return None
+    exponent_int = int(exponent)
+    if exponent_int < 0:
+        return None
+    magnitude = abs(float(base))
+    if magnitude in (0.0, 1.0):
+        return 1
+    try:
+        estimate = int(exponent_int * math.log10(magnitude)) + 1
+    except (OverflowError, ValueError):
+        return None
+    return max(1, estimate)
+
+
+def _format_calculator_message(
+    context: "EvaluatorContext",
+    operation: str,
+    expression: Numerical,
+    result: Numerical,
+    operands: Optional[list[int | float]] = None,
+) -> str:
+    calculator = context.options.calculator_mode
+    style = context.options.wording_style
+    operation_templates = (
+        calculator.concise_operation_templates
+        if style == "concise"
+        else calculator.operation_templates
+    )
+    base_template = (
+        calculator.concise_template if style == "concise" else calculator.template
+    )
+    template = operation_templates.get(operation, base_template)
+    lhs = render_latex(operands[0]) if operands and len(operands) > 0 else ""
+    rhs = render_latex(operands[1]) if operands and len(operands) > 1 else ""
+    payload = {
+        "operation": operation,
+        "expression": render_latex(expression),
+        "result": render_latex(result),
+        "lhs": lhs,
+        "rhs": rhs,
+    }
+    try:
+        return template.format(**payload)
+    except Exception:
+        return (
+            f"Use a calculator for this {operation}: "
+            + f"$$ {payload['expression']} = {payload['result']} $$"
+        )
+
+
+def _should_use_calculator_for_binary(
+    context: "EvaluatorContext",
+    operation: str,
+    lhs: int | float,
+    rhs: int | float,
+    result: Optional[int | float] = None,
+) -> bool:
+    calculator = context.options.calculator_mode
+    if calculator is None or not calculator.enabled:
+        return False
+    if not is_int_or_float(lhs) or not is_int_or_float(rhs):
+        return False
+    threshold_by_operation = {
+        "addition": calculator.addition_operand_complexity_threshold,
+        "subtraction": calculator.subtraction_operand_complexity_threshold,
+        "multiplication": calculator.multiplication_operand_complexity_threshold,
+    }
+    threshold = threshold_by_operation.get(operation, calculator.result_complexity_threshold)
+    if max(_numeric_complexity(lhs), _numeric_complexity(rhs)) > threshold:
+        return True
+    if result is not None and _numeric_complexity(result) > calculator.result_complexity_threshold:
+        return True
+    return False
+
+
+def _should_use_calculator_for_power(
+    context: "EvaluatorContext",
+    base: int | float,
+    exponent: int | float,
+) -> bool:
+    calculator = context.options.calculator_mode
+    if calculator is None or not calculator.enabled:
+        return False
+    if max(
+        _numeric_complexity(base),
+        _numeric_complexity(exponent),
+    ) > max(
+        calculator.power_base_complexity_threshold,
+        calculator.power_exponent_complexity_threshold,
+    ):
+        return True
+    if _numeric_complexity(base) > calculator.power_base_complexity_threshold:
+        return True
+    if _numeric_complexity(exponent) > calculator.power_exponent_complexity_threshold:
+        return True
+    estimate = _estimate_power_result_complexity(base, exponent)
+    if estimate is not None and estimate > calculator.result_complexity_threshold:
+        return True
+    return False
 
 
 class Snapshot:
@@ -207,7 +381,9 @@ class BlockContext:
     context: "EvaluatorContext"
 
     def __init__(self, trees: list[Numerical], context: "EvaluatorContext"):
-        self.trees = trees
+        # Work on a private list copy to avoid mutating AST argument lists in-place.
+        # In-place mutation can retroactively alter previously saved snapshots.
+        self.trees = list(trees)
         self.context = context
 
     def __enter__(self):
@@ -361,12 +537,17 @@ class EvaluatorContext:
                 # )
 
         if explanation:
-            snapshot.explanation = explanation.format(
-                snapshot=render_latex(new_tree),
-                previous=render_latex(previous),
-                original=render_latex(original),
-                simplified=render_latex(simplified),
-            )
+            try:
+                snapshot.explanation = explanation.format(
+                    snapshot=render_latex(new_tree),
+                    previous=render_latex(previous),
+                    original=render_latex(original),
+                    simplified=render_latex(simplified),
+                )
+            except (KeyError, ValueError, IndexError):
+                # Explanations often contain literal braces from LaTeX.
+                # If formatting fails, keep original text instead of crashing.
+                snapshot.explanation = explanation
             self.snapshots.append(snapshot)
         elif snapshot != previous or len(self.snapshots) == 0:
             self.snapshots.append(snapshot)
@@ -409,6 +590,16 @@ class EvaluatorContext:
         return "\n".join(rendered_chains) + ("\n" if rendered_chains else "")
 
     def render(self):
+        def _step_heading(step_number: int) -> str:
+            template = "## Step {number}"
+            options = self.options.wording_options
+            if options is not None and getattr(options, "step_heading_template", None):
+                template = options.step_heading_template
+            try:
+                return template.format(number=step_number)
+            except Exception:
+                return f"## Step {step_number}"
+
         steps = [[]]
         consecutive = []
         consecutive_portion = []
@@ -525,7 +716,7 @@ class EvaluatorContext:
             return "\n".join(filtered_steps[0])
         text = ""
         for i, step in enumerate(filtered_steps):
-            text += f"## Step {i+1}\n"
+            text += _step_heading(i + 1) + "\n"
             for substep in step:
                 text += substep + "\n"
         return text
@@ -591,6 +782,9 @@ def generate_table(rows: list) -> str:
 def get_coefficient_exponent(x):
     if x == 0:
         return 0, 0  # Special case: zero
+    if isinstance(x, float) and not math.isfinite(x):
+        # Keep non-finite values out of place-value decomposition paths.
+        return x, 0
 
     # Work with positive values, restore sign later
     sign = -1 if x < 0 else 1
@@ -675,6 +869,18 @@ def solve_sum(components, context: EvaluatorContext):
 
     def rpad(s, width):
         return s + "0" * (width - len(s))
+
+    def format_signed_values(values):
+        if len(values) == 0:
+            return "0"
+        rendered = []
+        for index, value in enumerate(values):
+            magnitude = abs(value)
+            if index == 0:
+                rendered.append(f"-{magnitude}" if value < 0 else f"{magnitude}")
+            else:
+                rendered.append(f"- {magnitude}" if value < 0 else f"+ {magnitude}")
+        return " ".join(rendered)
 
     # ---------- build aligned block ----------
     parts = [split_parts(to_trimmed_decimal_string(x)) for x in components]
@@ -763,14 +969,14 @@ def solve_sum(components, context: EvaluatorContext):
             if sum_values == 0 and carry == 0 and len(values) > 1:
                 continue
             if len(values) > 1:
-                step = f"$10^{{{p}}}$: ${' + '.join(map(str, values))} = {sum_values}$"
+                step = f"$10^{{{p}}}$: ${format_signed_values(values)} = {sum_values}$"
             else:
                 step = f"$10^{{{p}}}$: ${sum_values}$"
             if carry > 0:
                 step += wording(
                     context,
                     "addition_carry_suffix",
-                    f", carry the {carry}.",
+                    f", so carry {carry} to the next column.",
                     f", carry {carry}.",
                     carry=carry,
                 )
@@ -778,7 +984,7 @@ def solve_sum(components, context: EvaluatorContext):
                 step += wording(
                     context,
                     "addition_borrow_suffix",
-                    f", borrow a {-carry} and add 10 to get {digit}.",
+                    f", so borrow {-carry} from the next column and write {digit} here.",
                     f", borrow {-carry}; digit becomes {digit}.",
                     borrow=-carry,
                     digit=digit,
@@ -795,8 +1001,8 @@ def solve_sum(components, context: EvaluatorContext):
                 wording(
                     context,
                     "addition_carry_row",
-                    f"$10^{{{p+1}}}$: {carry} (carried)",
-                    f"$10^{{{p+1}}}$: {carry} carried",
+                    f"$10^{{{p+1}}}$: {carry} (carry from the previous column)",
+                    f"$10^{{{p+1}}}$: carry {carry}",
                     power=p + 1,
                     carry=carry,
                 ),
@@ -813,7 +1019,7 @@ def solve_sum(components, context: EvaluatorContext):
         wording(
             context,
             "addition_put_together",
-            f"Putting it together, we get ${result}$.",
+            f"Combine the place-value columns to obtain ${result}$.",
             f"Result: ${result}$.",
             result=result,
         ),
@@ -824,6 +1030,28 @@ def solve_sum(components, context: EvaluatorContext):
 
 
 def add(a, b, context: EvaluatorContext):
+    if (
+        (isinstance(a, float) and not math.isfinite(a))
+        or (isinstance(b, float) and not math.isfinite(b))
+    ):
+        context.snap(Sum([a, b]), a + b)
+        return a + b
+    quick_result = a + b
+    operation = "subtraction" if is_int_or_float(b) and b < 0 else "addition"
+    if _should_use_calculator_for_binary(context, operation, a, b, quick_result):
+        expression = Sum([a, b])
+        context.snap(
+            expression,
+            quick_result,
+            _format_calculator_message(
+                context,
+                operation,
+                expression,
+                quick_result,
+                [a, b],
+            ),
+        )
+        return quick_result
     limit = context.options.implicit_addition_limit
     a_coefficient, a_exponent = get_coefficient_exponent(a)
     b_coefficient, b_exponent = get_coefficient_exponent(b)
@@ -842,8 +1070,8 @@ def add(a, b, context: EvaluatorContext):
             wording(
                 context,
                 "addition_decompose_intro",
-                f"Let's break ${a}$ and ${b}$ down into their components.",
                 f"Decompose ${a}$ and ${b}$ into place-value components.",
+                f"Use place-value decomposition for ${a}$ and ${b}$.",
                 a=a,
                 b=b,
             ),
@@ -860,6 +1088,33 @@ def add(a, b, context: EvaluatorContext):
 
 
 def multiply(a, b, context: EvaluatorContext, quick_compute=True):
+    if (
+        (isinstance(a, float) and not math.isfinite(a))
+        or (isinstance(b, float) and not math.isfinite(b))
+    ):
+        context.snap(Product([a, b]), a * b)
+        return a * b
+    quick_result = a * b
+    if _should_use_calculator_for_binary(
+        context,
+        "multiplication",
+        a,
+        b,
+        quick_result,
+    ):
+        expression = Product([a, b])
+        context.snap(
+            expression,
+            quick_result,
+            _format_calculator_message(
+                context,
+                "multiplication",
+                expression,
+                quick_result,
+                [a, b],
+            ),
+        )
+        return quick_result
     limit = context.options.implicit_multiplication_limit
     a_coefficient, a_exponent = get_coefficient_exponent(a)
     b_coefficient, b_exponent = get_coefficient_exponent(b)
@@ -949,8 +1204,8 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
             wording(
                 context,
                 "multiply_complex_intro",
-                f"Because ${a}$ and ${b}$ are both too complex, let's break their product down into components and use a table to multiply each product. Then, we can sum the problems to find the solution to ${a} \\cdot {b}$.",
-                f"Break ${a} \\cdot {b}$ into place-value components and sum the partial products.",
+                f"Compute ${a} \\cdot {b}$ by place-value decomposition: form partial products, then add them.",
+                f"Use place-value decomposition for ${a} \\cdot {b}$ and add the partial products.",
                 a=a,
                 b=b,
             ),
@@ -971,8 +1226,8 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
             wording(
                 context,
                 "multiply_approximate_a",
-                f"${a}$ has too many significant digits. Let's approximate it to {a_approx} to make the multiplication easier.",
-                f"Approximate ${a}$ as ${a_approx}$ for easier multiplication.",
+                f"Approximate ${a}$ as ${a_approx}$ to control intermediate precision during multiplication.",
+                f"Approximate ${a}$ as ${a_approx}$ for multiplication.",
                 a=a,
                 approximate=a_approx,
             ),
@@ -997,8 +1252,8 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
                     wording(
                         context,
                         "multiply_approximate_b",
-                        f"${b}$ has too many significant digits. Let's approximate it to {b_approx} to make the multiplication easier.",
-                        f"Approximate ${b}$ as ${b_approx}$ for easier multiplication.",
+                        f"Approximate ${b}$ as ${b_approx}$ to control intermediate precision during multiplication.",
+                        f"Approximate ${b}$ as ${b_approx}$ for multiplication.",
                         b=b,
                         approximate=b_approx,
                     )
@@ -1020,7 +1275,7 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
                 wording(
                     context,
                     "multiply_decimal_shift_a",
-                    f"Multiply ${a}$ by $10^{{{a_exponent}}}$ to shift the decimal point to make the math easier.",
+                    f"Rewrite ${a}$ as an integer-scaled value times $10^{{{a_exponent}}}$.",
                     f"Rewrite ${a}$ using $10^{{{a_exponent}}}$ scaling.",
                     a=a,
                     exponent=a_exponent,
@@ -1036,7 +1291,7 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
                     wording(
                         context,
                         "multiply_decimal_shift_b",
-                        f"Multiply ${b}$ by $10^{{{b_exponent}}}$ to shift the decimal point to make the math easier.",
+                        f"Rewrite ${b}$ as an integer-scaled value times $10^{{{b_exponent}}}$.",
                         f"Rewrite ${b}$ using $10^{{{b_exponent}}}$ scaling.",
                         b=b,
                         exponent=b_exponent,
@@ -1093,7 +1348,7 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
             wording(
                 context,
                 "multiply_table_header",
-                "\n**Table of products:**",
+                "\n**Partial-product table:**",
                 "\n**Partial products:**",
             ),
             False,
@@ -1107,7 +1362,7 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
                 wording(
                     context,
                     "multiply_values_list_header",
-                    "**List of values to add:**",
+                    "**Add these partial values by place value:**",
                     "**Values to add:**",
                 ),
                 False,
@@ -1386,7 +1641,7 @@ def contains(expr, target):
         return 1
     match expr:
         case Power():
-            return contains(expr.base, target) or contains(expr.exponent, target)
+            return contains(expr.base, target) + contains(expr.exponent, target)
         case Product():
             if isinstance(target, Product) and target in expr:
                 return 1
@@ -1402,19 +1657,19 @@ def contains(expr, target):
                 + [contains(a, target) for a in expr.superscript_arguments]
             )
         case Derivative():
-            return contains(expr.expression, target) or sum(
+            return contains(expr.expression, target) + sum(
                 [contains(v, target) for v, _ in expr.variables]
             )
         case Integral():
             return (
                 contains(expr.expression, target)
-                or contains(expr.variable, target)
-                or (
+                + contains(expr.variable, target)
+                + (
                     contains(expr.lower, target)
                     if expr.lower is not None
                     else 0
                 )
-                or (
+                + (
                     contains(expr.upper, target)
                     if expr.upper is not None
                     else 0
@@ -1992,6 +2247,89 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
             with context.block([expression.exponent]) as block:
                 base = evaluate_expression(expression.base, context)
                 exponent = block[0]
+            if base == 0:
+                preview_context = EvaluatorContext(
+                    exponent,
+                    context.substitutions,
+                    options=context.options,
+                    error_on_invalid_snap=False,
+                )
+                preview_exponent = evaluate_expression(exponent, preview_context)
+                if is_int_or_float(preview_exponent):
+                    if preview_exponent == 0:
+                        match context.options.zero_power_zero_policy:
+                            case "one":
+                                context.snap(
+                                    expression,
+                                    1,
+                                    wording(
+                                        context,
+                                        "zero_power_zero_one",
+                                        "$0^0$ is configured to evaluate to $1$.",
+                                        "$0^0 \\rightarrow 1$ by configuration.",
+                                    ),
+                                )
+                                return 1
+                            case "zero":
+                                context.snap(
+                                    expression,
+                                    0,
+                                    wording(
+                                        context,
+                                        "zero_power_zero_zero",
+                                        "$0^0$ is configured to evaluate to $0$.",
+                                        "$0^0 \\rightarrow 0$ by configuration.",
+                                    ),
+                                )
+                                return 0
+                            case _:
+                                raise MathDomainError(
+                                    wording(
+                                        context,
+                                        "zero_power_zero_undefined",
+                                        "0^0 is undefined in this evaluator configuration.",
+                                        "0^0 is undefined.",
+                                    ),
+                                    expression,
+                                )
+                    if preview_exponent > 0:
+                        context.snap(
+                            expression,
+                            0,
+                            wording(
+                                context,
+                                "zero_power_positive",
+                                "0 raised to a positive power is 0.",
+                                "0^n is 0 for positive n.",
+                                exponent=preview_exponent,
+                            ),
+                        )
+                        return 0
+                    if preview_exponent < 0:
+                        raise MathDomainError(
+                            wording(
+                                context,
+                                "zero_power_negative",
+                                "0 raised to a negative power is undefined.",
+                                "0^n is undefined for negative n.",
+                                exponent=preview_exponent,
+                            ),
+                            expression,
+                        )
+                symbolic_zero_power = Power(base, preview_exponent)
+                context.set_status("partial", "zero_base_symbolic_exponent")
+                context.snap(
+                    expression,
+                    symbolic_zero_power,
+                    wording(
+                        context,
+                        "zero_power_symbolic",
+                        f"Keep ${render_latex(symbolic_zero_power)}$ symbolic because the exponent's sign is unknown.",
+                        "Keep 0^x symbolic when exponent sign is unknown.",
+                        expression=render_latex(symbolic_zero_power),
+                    ),
+                )
+                return symbolic_zero_power
             exponent_fraction = get_fraction(exponent)
             if exponent_fraction and exponent_fraction[0] == 1:
                 new_exponent = evaluate_expression(
@@ -2043,16 +2381,16 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                             ),
                             expression,
                         )
-            if base in [0, 1]:
-                result = base
+            if base == 1:
+                result = 1
                 context.snap(
                     expression,
                     result,
                     wording(
                         context,
                         "base_trivial_power",
-                        f"{base} to any power is {base}.",
-                        f"{base}^{render_latex(exponent)} = {base}.",
+                        "1 to any power is 1.",
+                        "1 raised to any exponent is 1.",
                         base=base,
                         exponent=exponent,
                     ),
@@ -2125,6 +2463,59 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                         False,
                     )
                     return expression
+                if _should_use_calculator_for_power(context, base, exponent):
+                    try:
+                        result = base**exponent
+                    except OverflowError:
+                        if context.options.overflow_policy == "infinity":
+                            context.snap(
+                                expression,
+                                float("inf"),
+                                explanation=wording(
+                                    context,
+                                    "overflow_python_infinity",
+                                    "${previous}$ overflowed during numeric evaluation, so we'll approximate it as $\\infty$.",
+                                    "Numeric overflow; approximate as $\\infty$.",
+                                ),
+                                approximate=True,
+                            )
+                            return float("inf")
+                        if context.options.overflow_policy == "zero":
+                            context.snap(
+                                expression,
+                                0,
+                                explanation=wording(
+                                    context,
+                                    "overflow_python_zero",
+                                    "${previous}$ overflowed during numeric evaluation, so we'll approximate it as $0$.",
+                                    "Numeric overflow; approximate as $0$.",
+                                ),
+                                approximate=True,
+                            )
+                            return 0
+                        context.snap(
+                            wording(
+                                context,
+                                "overflow_python_symbolic",
+                                f"${render_latex(expression)}$ overflowed during numeric evaluation, so we'll keep it in symbolic form.",
+                                f"Keep ${render_latex(expression)}$ symbolic due to numeric overflow.",
+                                expression=render_latex(expression),
+                            ),
+                            False,
+                        )
+                        return expression
+                    context.snap(
+                        expression,
+                        result,
+                        _format_calculator_message(
+                            context,
+                            "power",
+                            expression,
+                            result,
+                            [base, exponent],
+                        ),
+                    )
+                    return result
                 if (
                     context.options.expand_powers
                     and exponent > 1
@@ -2386,7 +2777,7 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                                 for v, o in expression.variables
                             ]
                         )
-                        + ".",
+                        + " using the applicable differentiation rules.",
                         "Applied differentiation rules.",
                     ),
                 )
@@ -2437,7 +2828,7 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                     wording(
                         context,
                         "integral_indefinite_result",
-                        f"Compute the antiderivative with respect to ${expression.variable.name}$.",
+                        f"Compute an antiderivative with respect to ${expression.variable.name}$.",
                         "Applied integration rules.",
                     ),
                 )
@@ -2463,8 +2854,8 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                 wording(
                     context,
                     "integral_definite_result",
-                    f"Apply the antiderivative at the bounds and subtract: $F({render_latex(upper)}) - F({render_latex(lower)})$.",
-                    "Evaluate antiderivative at bounds.",
+                    f"Apply the Fundamental Theorem of Calculus: evaluate the antiderivative at the bounds and subtract, $F({render_latex(upper)}) - F({render_latex(lower)})$.",
+                    "Evaluate antiderivative at bounds and subtract.",
                 ),
             )
             return evaluate_expression(difference, context)
@@ -2540,9 +2931,18 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                 [arg for arg in subscript_arguments],
                 [arg for arg in superscript_arguments],
             )
-            if contains(context.current_tree, evaluated_call) > 0:
+            eval_occurrences = contains(context.current_tree, evaluated_call)
+            expr_occurrences = contains(context.current_tree, expression)
+            if isinstance(eval_occurrences, bool):
+                eval_occurrences = int(eval_occurrences)
+            if isinstance(expr_occurrences, bool):
+                expr_occurrences = int(expr_occurrences)
+
+            # Avoid globally replacing duplicate identical calls in unrelated subtrees.
+            # This can corrupt nested-derivative/integral branches that should be evaluated separately.
+            if eval_occurrences == 1:
                 context.snap(evaluated_call, result)
-            elif contains(context.current_tree, expression) > 0:
+            elif expr_occurrences == 1:
                 context.snap(expression, result)
         case Symbol():
             if expression.name in context.substitutions:
@@ -2556,10 +2956,12 @@ def evaluate(
     expression: Numerical,
     substitutions: dict[str, int | float] = {},
     error_on_invalid_snap: bool = True,
+    options: Optional[EvaluatorOptions] = None,
 ):
     context = EvaluatorContext(
         expression,
         substitutions,
+        options=options or EvaluatorOptions(),
         error_on_invalid_snap=error_on_invalid_snap,
     )
     # context.snap(f"Given the expression:\n$${render_latex(expression)}$$")
@@ -2598,8 +3000,8 @@ def evaluate(
             wording(
                 context,
                 "substitution_intro",
-                f"Substitute {''.join(substitutions)}:",
-                f"Substitute {''.join(substitutions)}:",
+                f"Substitute the given values: {''.join(substitutions)}.",
+                f"Substitute values: {''.join(substitutions)}.",
                 substitutions="".join(substitutions),
             ),
             False,
@@ -2623,8 +3025,7 @@ def evaluate(
             error_message = wording(
                 context,
                 "domain_error_function",
-                f"We cannot simplify the expression any further because ${render_latex(e.expression)}$ is undefined. "
-                + f"Those values are out of domain for {e.expression.function.name}.",
+                f"Stop here: ${render_latex(e.expression)}$ is undefined for {e.expression.function.name}, so the expression is outside its domain.",
                 f"${render_latex(e.expression)}$ is undefined for {e.expression.function.name}.",
                 expression=render_latex(e.expression),
                 function_name=e.expression.function.name,
@@ -2633,7 +3034,7 @@ def evaluate(
             error_message = wording(
                 context,
                 "domain_error_generic",
-                f"We cannot simplify the expression any further because ${render_latex(e.expression)}$ is undefined.",
+                f"Stop here: ${render_latex(e.expression)}$ is undefined in the real-number domain used by this evaluator.",
                 f"${render_latex(e.expression)}$ is undefined.",
                 expression=render_latex(e.expression),
             )

@@ -162,8 +162,10 @@ $$ 4 + 7 + 0.9 + 0.006 + 0.0002 + 0.00003 = 11.90623 $$
 
 ## Core API Overview
 
-- `evaluate(expression, substitutions={}, error_on_invalid_snap=True)`
+- `evaluate(expression, substitutions={}, error_on_invalid_snap=True, options=None)`
   - Returns `(result, context)`
+- `compact_evaluator_options(...)`
+  - Returns a compact preset for shorter explanations and lower token cost
 - `render(expression, group=False)`
   - Plain text expression rendering
 - `render_latex(expression, renderOptions=...)`
@@ -186,6 +188,87 @@ Expressionizer includes a native rule-based calculus engine for derivatives and 
 - Some advanced integrals and non-elementary forms will remain symbolic (by design) rather than returning incorrect simplifications.
 - For procedural generation, prefer `guarantee_solvable=True` when you need high reliability for auto-generated calculus problems.
 - The evaluator now exposes solve metadata (`solve_status`, `reason_code`, coverage tags, explanation events) so you can filter low-confidence outputs in training pipelines.
+
+## Explanation Customization
+
+You can tune both evaluator behavior and wording style without changing defaults:
+
+```python
+from expressionizer import EvaluatorOptions, WordingOptions, evaluate
+
+result, context = evaluate(
+    expr,
+    substitutions=substitutions,
+    options=EvaluatorOptions(
+        wording_style="concise",
+        wording_options=WordingOptions(step_heading_template="### Phase {number}"),
+    ),
+)
+```
+
+For long numeric arithmetic, you can enable/configure calculator mode. This is useful for
+student-friendly readability and for AI training-data workflows that need tool-call placeholders:
+
+```python
+from expressionizer import CalculatorModeOptions, EvaluatorOptions, evaluate
+
+result, context = evaluate(
+    expr,
+    substitutions=substitutions,
+    options=EvaluatorOptions(
+        calculator_mode=CalculatorModeOptions(
+            enabled=True,
+            multiplication_operand_complexity_threshold=6,
+            result_complexity_threshold=20,
+            template="<tool_call name='calculator' op='{operation}' expr='{expression}' />\nResult: {result}",
+        )
+    ),
+)
+```
+
+Available calculator placeholders include:
+
+- `{operation}`: `addition`, `subtraction`, `multiplication`, or `power`
+- `{expression}`: rendered expression
+- `{result}`: rendered final value
+- `{lhs}`, `{rhs}`: left/right operands for binary operations
+
+Default behavior now includes calculator mode with practical thresholds so large numeric
+arithmetic does not produce excessively long place-value traces.
+
+For compact output presets:
+
+```python
+from expressionizer import compact_evaluator_options, evaluate
+
+result, context = evaluate(
+    expr,
+    substitutions=substitutions,
+    options=compact_evaluator_options(step_heading_template="### Step {number}"),
+)
+```
+
+CLI tools also support:
+
+- `--wording-style verbose|concise`
+- `--compact-explanations`
+- `--step-heading-template "### Phase {number}"`
+- `--generation-profile realistic|stress`
+  - `realistic` is user-facing and avoids extreme expression blowups
+  - `stress` is broader/extreme for robustness testing
+
+## Quality and Audit Utilities
+
+- `python -m expressionizer.procedural_test ...`
+  - Stress-tests generated expressions/equations until a failure or timeout
+- `python -m expressionizer.explanation_audit ...`
+  - Audits explanation consistency and optional SymPy equivalence
+- `python -m expressionizer.manual_review_cases --cases 40 --generation-profile realistic`
+  - Generates user-facing manual-review samples with safer default complexity
+- `python -m expressionizer.equation_manual_review_cases --cases 40`
+  - Generates a markdown set of equation/system explanations for manual review
+- `python release_smoke.py`
+  - Runs a quick pre-release local smoke check
 
 ## Compatibility
 

@@ -811,8 +811,37 @@ class InEquality:
         return True
 
 
+class SystemOfEquations:
+    __match_args__ = ("equations",)
+
+    def __init__(self, equations: List[Equation]):
+        self.equations = equations
+
+    def __str__(self) -> str:
+        return "; ".join(map(repr, self.equations))
+
+    def __repr__(self) -> str:
+        return str(self)
+
+    def __hash__(self):
+        return hash(tuple(self.equations))
+
+    def __bool__(self):
+        return True
+
+
 def symbol(name: str):
     return Symbol(name)
+
+
+def equation(*expressions: Numerical):
+    if len(expressions) < 2:
+        raise ValueError("Equation requires at least two expressions.")
+    return Equation(list(expressions))
+
+
+def system_of_equations(equations: List[Equation]):
+    return SystemOfEquations(equations)
 
 
 def power(base: Numerical, exponent: Numerical = 1):
@@ -824,7 +853,7 @@ def power(base: Numerical, exponent: Numerical = 1):
     elif exponent == 1:
         return base
     elif isinstance(base, Power):
-        return Power(base.base, base.exponent * exponent)
+        return Power(base.base, product([base.exponent, exponent]))
     else:
         return Power(base, exponent)
 
