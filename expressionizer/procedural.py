@@ -1,4 +1,4 @@
-from typing import Callable, Literal
+from typing import Callable, Literal, Optional
 from .evaluator import evaluate
 from .render import render_latex, render_type
 from .expression import (
@@ -23,6 +23,11 @@ import math
 import random
 import math
 import statistics
+
+
+def seed_generation(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
 
 
 def _require_integer_argument(value: int | float, name: str) -> int:
@@ -268,12 +273,16 @@ def generate_number(
 
 
 class ExpressionContext:
-    taken: set[str] = set()
-    substitutions: dict[str, int | float | Callable] = {}
+    taken: set[str]
+    substitutions: dict[str, int | float | Callable]
+    intended_unsolvable_reason: Optional[str] = None
+    generated_problem_family: Optional[str] = None
 
     def __init__(self):
         self.taken = set()
         self.substitutions = {}
+        self.intended_unsolvable_reason = None
+        self.generated_problem_family = None
 
 
 FUNCTIONS = {
@@ -434,13 +443,14 @@ def generate_random_expression(
     allow_calculus=False,
     allow_definite_integrals=True,
     max_derivative_order=2,
-    difficulty: str = "intermediate",
+    complexity: Optional[float] = None,
     guarantee_solvable: bool = False,
     generation_profile: Literal["realistic", "stress"] = "realistic",
     solvability_mode: Literal["mixed", "solvable", "unsolvable"] = "mixed",
     unsolvable_probability: float = 0.12,
     hard_problem_probability: float = 0.2,
-    context: ExpressionContext = ExpressionContext(),
+    problem_families: Optional[list[str]] = None,
+    context: Optional[ExpressionContext] = None,
 ):
     """
     Generates a random mathematical expression, now with support for functions.
@@ -549,9 +559,11 @@ def generate_random_expression(
             ]
         )
 
-    difficulty = (difficulty or "intermediate").lower()
-    if difficulty not in ("beginner", "intermediate", "advanced"):
-        difficulty = "intermediate"
+    if context is None:
+        context = ExpressionContext()
+    if complexity is None:
+        complexity = 0.5
+    complexity = max(0.0, min(1.0, float(complexity)))
     generation_profile = (generation_profile or "realistic").lower()
     if generation_profile not in ("realistic", "stress"):
         generation_profile = "realistic"
@@ -568,12 +580,12 @@ def generate_random_expression(
         if solvability_mode == "unsolvable"
         else (0.0 if solvability_mode == "solvable" else unsolvable_probability)
     )
-    if difficulty == "beginner":
-        max_depth = min(max_depth, 3)
-    elif difficulty == "intermediate" and generation_profile == "realistic":
-        max_depth = min(max_depth, 4)
-    elif difficulty == "advanced":
-        max_depth = max(max_depth, 6) if generation_profile == "stress" else min(max_depth, 5)
+    if generation_profile == "realistic":
+        target_depth = 2 + int(round(3 * complexity))
+        max_depth = min(max_depth, target_depth)
+    else:
+        target_depth = 3 + int(round(4 * complexity))
+        max_depth = max(max_depth, target_depth)
 
     if (
         generation_profile == "realistic"
@@ -581,19 +593,18 @@ def generate_random_expression(
         and random.random() < hard_problem_probability
     ):
         # Keep realism but occasionally elevate challenge.
-        if difficulty == "beginner":
-            max_depth = min(4, max_depth + 1)
-        elif difficulty == "intermediate":
-            max_depth = min(5, max_depth + 1)
-        else:
-            max_depth = min(6, max_depth + 1)
+        max_depth = min(7, max_depth + 1 + int(complexity >= 0.75))
 
     # Base case for recursion
     p = 0.3 + 0.7 * (_depth / max_depth)
-    if (_depth >= max_depth or random.random() < p) and (
+    if (_depth >= max_depth or random.random() < p) and not (
+        _depth == 0 and problem_families
+    ) and (
         _depth > 0 or random.random() < 0.0005
     ):
         if random.random() < 0.8:
+            if _depth == 0:
+                context.generated_problem_family = "atom"
             return generate_number(
                 mean=mean,
                 std=std,
@@ -605,6 +616,8 @@ def generate_random_expression(
                 require_integer=require_integer,
             )
         else:
+            if _depth == 0:
+                context.generated_problem_family = "atom"
             return get_variable()
 
     # Pass constraints down the recursion
@@ -624,16 +637,17 @@ def generate_random_expression(
         "allow_calculus": allow_calculus,
         "allow_definite_integrals": allow_definite_integrals,
         "max_derivative_order": max_derivative_order,
-        "difficulty": difficulty,
+        "complexity": complexity,
         "guarantee_solvable": guarantee_solvable,
         "generation_profile": generation_profile,
         "solvability_mode": solvability_mode,
         "unsolvable_probability": unsolvable_probability,
         "hard_problem_probability": hard_problem_probability,
+        "problem_families": problem_families,
         "context": context,
     }
 
-    def _generate_unsolvable_atom():
+    def _generate_unsolvable_atom() -> tuple[Numerical, str]:
         mode = random.choice(
             [
                 "sqrt_negative",
@@ -644,14 +658,20 @@ def generate_random_expression(
             ]
         )
         if mode == "sqrt_negative":
-            return FunctionCall(
+            return (
+                FunctionCall(
                 MathFunction("sqrt", functional_parameters=1),
                 [generate_number(mean=6, std=2, exponent=1.2, allow_negative=False, allow_zero=False, require_integer=True) * -1],
+                ),
+                mode,
             )
         if mode == "log_nonpositive":
-            return FunctionCall(
+            return (
+                FunctionCall(
                 MathFunction("log", functional_parameters=1),
                 [0 if random.random() < 0.5 else -generate_number(mean=4, std=2, exponent=1.2, allow_negative=False, allow_zero=False, require_integer=True)],
+                ),
+                mode,
             )
         if mode == "inverse_trig_outside_domain":
             value = generate_number(
@@ -665,11 +685,14 @@ def generate_random_expression(
             if value <= 1:
                 value = value + 1.5
             inverse_fn = random.choice(["asin", "acos"])
-            return FunctionCall(MathFunction(inverse_fn, functional_parameters=1), [value])
+            return FunctionCall(MathFunction(inverse_fn, functional_parameters=1), [value]), mode
         if mode == "factorial_negative":
-            return FunctionCall(
+            return (
+                FunctionCall(
                 MathFunction("factorial", functional_parameters=1),
                 [-generate_number(mean=4, std=2, exponent=1.2, allow_negative=False, allow_zero=False, require_integer=True)],
+                ),
+                mode,
             )
         # division_by_zero
         non_zero_numerator = generate_number(
@@ -680,17 +703,22 @@ def generate_random_expression(
             allow_zero=False,
             require_integer=True,
         )
-        return product([non_zero_numerator, power(0, -1)])
+        return product([non_zero_numerator, power(0, -1)]), mode
 
     if _depth == 0 and random.random() < effective_unsolvable_probability:
         if random.random() < 0.55:
-            return _generate_unsolvable_atom()
+            uns_expr, uns_reason = _generate_unsolvable_atom()
+            context.intended_unsolvable_reason = uns_reason
+            context.generated_problem_family = "unsolvable"
+            return uns_expr
         safe_args = recursive_args.copy()
         safe_args["solvability_mode"] = "solvable"
         safe_args["unsolvable_probability"] = 0.0
         safe_args["_depth"] = _depth + 1
         benign = generate_random_expression(**safe_args)
-        uns = _generate_unsolvable_atom()
+        uns, uns_reason = _generate_unsolvable_atom()
+        context.intended_unsolvable_reason = uns_reason
+        context.generated_problem_family = "unsolvable"
         return Sum([benign, uns]) if random.random() < 0.5 else Product([benign, uns])
 
     # Decide the type of expression to generate
@@ -703,30 +731,34 @@ def generate_random_expression(
         choices.remove("function")
         weights = [weights[i] for i, c in enumerate(choices) if c != "function"]
         choices = [c for c in choices if c != "function"]
+    if problem_families:
+        allowed = {name.strip().lower() for name in problem_families if name.strip()}
+        filtered: list[tuple[str, float]] = [
+            (choice, weight)
+            for choice, weight in zip(choices, weights)
+            if choice in allowed
+        ]
+        if filtered:
+            choices = [choice for choice, _ in filtered]
+            weights = [weight for _, weight in filtered]
     expr_type = random.choices(choices, weights=weights, k=1)[0]
+    if _depth == 0:
+        context.generated_problem_family = expr_type
 
     if expr_type == "sum":
         if generation_profile == "stress":
-            max_terms = (
-                8 if difficulty == "beginner" else (10 if difficulty == "intermediate" else 12)
-            )
+            max_terms = 5 + int(round(6 * complexity))
         else:
-            max_terms = (
-                5 if difficulty == "beginner" else (6 if difficulty == "intermediate" else 8)
-            )
+            max_terms = 3 + int(round(4 * complexity))
         num_terms = generate_weighted_random_int(2, max_terms)
         terms = [generate_random_expression(**recursive_args) for _ in range(num_terms)]
         return Sum(terms)
 
     elif expr_type == "product":
         if generation_profile == "stress":
-            max_factors = (
-                6 if difficulty == "beginner" else (8 if difficulty == "intermediate" else 10)
-            )
+            max_factors = 3 + int(round(5 * complexity))
         else:
-            max_factors = (
-                4 if difficulty == "beginner" else (5 if difficulty == "intermediate" else 6)
-            )
+            max_factors = 2 + int(round(3 * complexity))
         num_factors = generate_weighted_random_int(2, max_factors)
         factors = [
             generate_random_expression(**recursive_args) for _ in range(num_factors)
@@ -742,16 +774,38 @@ def generate_random_expression(
                 exponent_args["require_integer"] = True
             elif evaluated_base == 0:
                 exponent_args["allow_negative"] = False
-        exponent_args["decimal_probability"] = 0.9
-        exponent = generate_random_expression(**exponent_args)
+        # Keep exponent generation intentionally narrower to avoid explosive towers
+        # like a^(b^(c^...)) under stress profiles.
+        exponent_args["decimal_probability"] = 0.92
+        exponent_args["mean"] = max(1.4, mean * 0.35)
+        exponent_args["std"] = max(0.8, std * 0.3)
+        exponent_args["gen_exponent"] = min(1.15, gen_exponent)
+        exponent_args["allow_calculus"] = False
+        exponent_args["max_depth"] = min(2, max_depth)
+        exponent_args["problem_families"] = ["sum", "product", "function"]
+
+        # Most exponents are generated directly as small integers/floats.
+        if random.random() < 0.72:
+            exponent = generate_number(
+                mean=exponent_args["mean"],
+                std=exponent_args["std"],
+                exponent=exponent_args["gen_exponent"],
+                negative_probability=negative_probability,
+                decimal_probability=0.95,
+                allow_negative=allow_negative and evaluated_base != 0,
+                allow_zero=True,
+                require_integer=(evaluated_base < 0)
+                if isinstance(evaluated_base, (int, float))
+                else False,
+            )
+        else:
+            exponent = generate_random_expression(**exponent_args)
         evaluated_exponent, _ = evaluate(exponent, error_on_invalid_snap=False)
         if isinstance(evaluated_exponent, (int, float)):
             if generation_profile == "stress":
-                exponent_cap = 32
+                exponent_cap = 12 + int(round(24 * complexity))
             else:
-                exponent_cap = (
-                    8 if difficulty == "beginner" else (10 if difficulty == "intermediate" else 12)
-                )
+                exponent_cap = 6 + int(round(8 * complexity))
             if abs(evaluated_exponent) > exponent_cap:
                 evaluated_exponent = exponent_cap if evaluated_exponent > 0 else -exponent_cap
             if (

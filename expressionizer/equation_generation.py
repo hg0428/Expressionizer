@@ -6,13 +6,12 @@ from typing import Literal
 from .expression import Equation, Symbol, SystemOfEquations, equation, power, product, sum
 
 
-def _difficulty_range(difficulty: str) -> tuple[int, int]:
-    difficulty = (difficulty or "intermediate").lower()
-    if difficulty == "beginner":
-        return -9, 9
-    if difficulty == "advanced":
-        return -30, 30
-    return -15, 15
+def _complexity_range(complexity: float | None = None) -> tuple[int, int]:
+    if complexity is None:
+        complexity = 0.5
+    complexity = max(0.0, min(1.0, float(complexity)))
+    bound = 9 + int(round(24 * complexity))
+    return -bound, bound
 
 
 def _nonzero_int(low: int, high: int) -> int:
@@ -23,10 +22,10 @@ def _nonzero_int(low: int, high: int) -> int:
 
 
 def generate_linear_equation(
-    difficulty: str = "intermediate",
+    complexity: float | None = None,
     variable_name: str = "x",
 ) -> tuple[Equation, list[Symbol]]:
-    low, high = _difficulty_range(difficulty)
+    low, high = _complexity_range(complexity)
     variable = Symbol(variable_name)
 
     # Build ax + b = cx + d with a != c so there is a unique linear isolation target.
@@ -43,10 +42,10 @@ def generate_linear_equation(
 
 
 def generate_quadratic_equation(
-    difficulty: str = "intermediate",
+    complexity: float | None = None,
     variable_name: str = "x",
 ) -> tuple[Equation, list[Symbol]]:
-    low, high = _difficulty_range(difficulty)
+    low, high = _complexity_range(complexity)
     variable = Symbol(variable_name)
 
     leading = _nonzero_int(low, high)
@@ -59,10 +58,10 @@ def generate_quadratic_equation(
 
 
 def generate_rational_equation(
-    difficulty: str = "intermediate",
+    complexity: float | None = None,
     variable_name: str = "x",
 ) -> tuple[Equation, list[Symbol]]:
-    low, high = _difficulty_range(difficulty)
+    low, high = _complexity_range(complexity)
     variable = Symbol(variable_name)
 
     # (a*x + b)/x = c  ->  a*x + b = c*x  (linear after clearing denominator, x != 0)
@@ -78,7 +77,7 @@ def generate_rational_equation(
 
 
 def generate_linear_system(
-    difficulty: str = "intermediate",
+    complexity: float | None = None,
     size: int = 2,
 ) -> tuple[SystemOfEquations, list[Symbol]]:
     if size < 2:
@@ -86,7 +85,7 @@ def generate_linear_system(
     if size > 3:
         size = 3
 
-    low, high = _difficulty_range(difficulty)
+    low, high = _complexity_range(complexity)
     variables = [Symbol(chr(ord("x") + i)) for i in range(size)]
 
     # Pick an integer solution first, then construct equations from random invertible matrix rows.
@@ -125,33 +124,71 @@ def generate_linear_system(
 
 
 def generate_random_equation_problem(
-    difficulty: str = "intermediate",
+    complexity: float | None = None,
     mode: Literal["equation", "system", "mixed"] = "mixed",
+    equation_families: list[str] | None = None,
 ) -> tuple[Equation | SystemOfEquations, list[Symbol], str]:
-    chosen_mode = mode
-    if mode == "mixed":
-        roll = random.random()
-        if roll < 0.3:
-            chosen_mode = "system"
-        else:
-            chosen_mode = "equation"
+    if complexity is None:
+        complexity = 0.5
+    complexity = max(0.0, min(1.0, float(complexity)))
+    valid_families = {"linear", "quadratic", "rational", "system"}
+    allowed_families = set(valid_families)
+    if equation_families:
+        requested = {family.strip().lower() for family in equation_families if family.strip()}
+        constrained = requested & valid_families
+        if constrained:
+            allowed_families = constrained
 
-    if chosen_mode == "system":
-        size = 2 if difficulty != "advanced" else (2 if random.random() < 0.65 else 3)
-        system, variables = generate_linear_system(difficulty=difficulty, size=size)
+    if mode == "system":
+        allowed_families = {"system"}
+    elif mode == "equation":
+        allowed_families = {name for name in allowed_families if name != "system"}
+        if not allowed_families:
+            allowed_families = {"linear", "quadratic", "rational"}
+
+    choose_system = False
+    if "system" in allowed_families:
+        if mode == "system":
+            choose_system = True
+        elif mode == "mixed":
+            choose_system = random.random() < 0.3
+        elif allowed_families == {"system"}:
+            choose_system = True
+
+    if choose_system:
+        size = 2 if complexity < 0.65 else (2 if random.random() < 0.5 else 3)
+        system, variables = generate_linear_system(complexity=complexity, size=size)
         return system, variables, "system"
 
-    equation_roll = random.random()
-    rational_probability = 0.15 if difficulty == "beginner" else (0.25 if difficulty == "intermediate" else 0.35)
-    quadratic_probability = 0.2 if difficulty == "beginner" else (0.35 if difficulty == "intermediate" else 0.5)
+    rational_probability = 0.1 + 0.35 * complexity
+    quadratic_probability = 0.15 + 0.45 * complexity
+    linear_probability = max(0.05, 1.0 - rational_probability - quadratic_probability)
 
-    if equation_roll < rational_probability:
-        eq, variables = generate_rational_equation(difficulty=difficulty, variable_name="x")
+    candidates: list[tuple[str, float]] = []
+    if "linear" in allowed_families:
+        candidates.append(("linear", linear_probability))
+    if "quadratic" in allowed_families:
+        candidates.append(("quadratic", quadratic_probability))
+    if "rational" in allowed_families:
+        candidates.append(("rational", rational_probability))
+
+    if not candidates:
+        # Fallback to linear equation generation if families were constrained to empty equation set.
+        candidates = [("linear", 1.0)]
+
+    equation_family = random.choices(
+        [name for name, _ in candidates],
+        weights=[weight for _, weight in candidates],
+        k=1,
+    )[0]
+
+    if equation_family == "rational":
+        eq, variables = generate_rational_equation(complexity=complexity, variable_name="x")
         return eq, variables, "rational_equation"
 
-    if equation_roll < (rational_probability + quadratic_probability):
-        eq, variables = generate_quadratic_equation(difficulty=difficulty, variable_name="x")
+    if equation_family == "quadratic":
+        eq, variables = generate_quadratic_equation(complexity=complexity, variable_name="x")
         return eq, variables, "quadratic_equation"
 
-    eq, variables = generate_linear_equation(difficulty=difficulty, variable_name="x")
+    eq, variables = generate_linear_equation(complexity=complexity, variable_name="x")
     return eq, variables, "equation"

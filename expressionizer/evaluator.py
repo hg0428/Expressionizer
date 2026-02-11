@@ -1,5 +1,6 @@
 import builtins
 import inspect
+import json
 import math
 import sys
 from dataclasses import dataclass, field
@@ -158,6 +159,7 @@ class EvaluatorOptions:
     explanation_verbosity: Literal["minimal", "normal", "detailed"] = "normal"
     zero_power_zero_policy: Literal["undefined", "one", "zero"] = "undefined"
     overflow_policy: Literal["symbolic", "infinity", "zero"] = "symbolic"
+    order_of_magnitude_threshold: Optional[int] = 28
     calculator_mode: CalculatorModeOptions = field(default_factory=CalculatorModeOptions)
     explanation_profile: Optional[ExplanationProfile] = None
 
@@ -230,6 +232,13 @@ def _estimate_power_result_complexity(base: int | float, exponent: int | float) 
     except (OverflowError, ValueError):
         return None
     return max(1, estimate)
+
+
+def _order_of_magnitude_expression(order: int, sign: int = 1) -> Numerical:
+    magnitude_expr = power(10, max(0, int(order)))
+    if sign < 0:
+        return product([-1, magnitude_expr])
+    return magnitude_expr
 
 
 def _format_calculator_message(
@@ -424,21 +433,22 @@ class EvaluatorContext:
     reason_code: Optional[str]
     coverage_tags: set[str]
     localizer: Localizer
+    localization_diagnostics: dict[str, Any]
 
     def __init__(
         self,
         tree: Numerical,
-        substitutions: dict[str, int | float] = {},
-        options: EvaluatorOptions = EvaluatorOptions(),
+        substitutions: Optional[dict[str, int | float]] = None,
+        options: Optional[EvaluatorOptions] = None,
         error_on_invalid_snap: bool = True,
     ):
-        self.substitutions = substitutions
+        self.substitutions = substitutions or {}
         self.snapshots = [Snapshot(tree, tree, tree, tree)]
         self.blocks = []
         self.current_tree = tree
         self.original_tree = tree
-        self.options = options
-        self.localizer = Localizer.from_profile(options.explanation_profile)
+        self.options = options or EvaluatorOptions()
+        self.localizer = Localizer.from_profile(self.options.explanation_profile)
         self.error_on_invalid_snap = error_on_invalid_snap
         self.error_count = 0
         self.is_approximate = False
@@ -446,6 +456,7 @@ class EvaluatorContext:
         self.solve_status = "exact"
         self.reason_code = None
         self.coverage_tags = set()
+        self.localization_diagnostics = {}
 
     def add_coverage_tag(self, tag: str):
         if tag:
@@ -499,10 +510,16 @@ class EvaluatorContext:
         if approximate:
             self.is_approximate = True
         if isinstance(original, str):
-            # print(original)
-            return self.snapshots.append(
-                TextSnapshot(self.localizer.transform_text(original), bool(simplified))
-            )
+            rendered_text = self.localizer.transform_text(original)
+            text_snapshot = TextSnapshot(rendered_text, bool(simplified))
+            if (
+                len(self.snapshots) > 0
+                and isinstance(self.snapshots[-1], TextSnapshot)
+                and str(self.snapshots[-1]) == str(text_snapshot)
+            ):
+                return
+            self.snapshots.append(text_snapshot)
+            return
         if contains(self.current_tree, original) <= 0:
             if self.error_on_invalid_snap:
                 raise ValueError(
@@ -578,6 +595,17 @@ class EvaluatorContext:
 
         rendered_chains: list[str] = []
         for chain in chains:
+            deduped_chain: list[Snapshot] = []
+            for step in chain:
+                if (
+                    len(deduped_chain) > 0
+                    and step.full_tree == deduped_chain[-1].full_tree
+                ):
+                    continue
+                deduped_chain.append(step)
+            if len(deduped_chain) == 0:
+                continue
+            chain = deduped_chain
             first = chain[0]
             if len(chain) == 1 and first.previous_tree == first.full_tree:
                 rendered_chains.append(f"$$ {render_latex(first.full_tree)} $$")
@@ -740,7 +768,9 @@ class EvaluatorContext:
                     "newline": newline,
                 },
             )
-            return document_prefix + block + document_suffix
+            rendered = document_prefix + block + document_suffix
+            self.localization_diagnostics = self.localizer.diagnostics()
+            return rendered
         blocks: list[str] = []
         for i, step in enumerate(filtered_steps):
             body = substep_joiner.join(step)
@@ -756,7 +786,162 @@ class EvaluatorContext:
                     },
                 )
             )
-        return document_prefix + step_joiner.join(blocks) + document_suffix
+        rendered = document_prefix + step_joiner.join(blocks) + document_suffix
+        self.localization_diagnostics = self.localizer.diagnostics()
+        return rendered
+
+    def render_document(self) -> dict[str, Any]:
+        def _step_heading(step_number: int) -> str:
+            template = self.localizer.template("step.heading", "## {number}")
+            options = self.options.wording_options
+            prefer_default = False
+            if options is not None and getattr(options, "step_heading_template", None):
+                template = options.step_heading_template
+                prefer_default = True
+            template = self.localizer.template(
+                "step.heading",
+                template,
+                prefer_default=prefer_default,
+            )
+            try:
+                return template.format(number=step_number)
+            except Exception:
+                return f"## {step_number}"
+
+        newline = self.localizer.template("render.newline", "\n")
+        steps = [[]]
+        consecutive = []
+        consecutive_portion = []
+        last_consecutive_last = None
+        current_portion = None
+        previous = None
+        previous_is_snapshot = False
+        previous_snapshot = None
+        for snapshot in self.snapshots:
+            is_snapshot = isinstance(snapshot, Snapshot)
+            if (
+                previous_snapshot
+                and is_snapshot
+                and contains(previous_snapshot.portion, snapshot.original) > 0
+            ):
+                if (
+                    current_portion
+                    and current_portion != previous_snapshot.portion
+                    and contains(current_portion, snapshot.original) > 0
+                ):
+                    current_portion = replace_sub(
+                        current_portion,
+                        snapshot.original,
+                        snapshot.portion,
+                    )
+                else:
+                    current_portion = replace_sub(
+                        previous_snapshot.portion,
+                        snapshot.original,
+                        snapshot.portion,
+                    )
+                if not consecutive_portion:
+                    consecutive_portion.append(previous_snapshot)
+                consecutive_portion.append(snapshot)
+
+            elif (
+                previous_snapshot
+                and is_snapshot
+                and contains(snapshot.full_tree, previous_snapshot.portion)
+                < contains(previous_snapshot.full_tree, previous_snapshot.original)
+            ):
+                current_portion = snapshot.portion
+                if not consecutive_portion:
+                    consecutive_portion.append(previous_snapshot)
+                consecutive_portion.append(snapshot)
+            elif is_snapshot and not (
+                not previous_is_snapshot and (previous and previous.breakpoint)
+            ):
+                if last_consecutive_last and len(consecutive) > 0:
+                    steps[-1].append(
+                        self.render_expressions([last_consecutive_last, *consecutive])
+                    )
+                elif len(consecutive) > 1:
+                    steps[-1].append(self.render_expressions(consecutive))
+                last_consecutive_last = (
+                    consecutive[-1] if len(consecutive) > 0 else None
+                )
+                steps.append([])
+                current_portion = None
+                consecutive_portion = []
+                consecutive = []
+            if isinstance(snapshot, TextSnapshot) or snapshot.explanation:
+                if last_consecutive_last and len(consecutive) > 0:
+                    steps[-1].append(
+                        self.render_expressions([last_consecutive_last, *consecutive])
+                    )
+                elif len(consecutive) > 1:
+                    steps[-1].append(self.render_expressions(consecutive))
+                last_consecutive_last = (
+                    consecutive[-1] if len(consecutive) > 0 else None
+                )
+                steps[-1].append(
+                    str(snapshot)
+                    if isinstance(snapshot, TextSnapshot)
+                    else snapshot.explanation + "\n"
+                )
+                consecutive = []
+            else:
+                is_duplicate = (
+                    previous_snapshot
+                    and snapshot.full_tree == previous_snapshot.full_tree
+                )
+                if (
+                    is_duplicate
+                    and snapshot.explanation
+                    and len(consecutive) > 0
+                    and not consecutive[-1].explanation
+                ):
+                    consecutive.pop()
+                    is_duplicate = False
+
+                if not is_duplicate:
+                    consecutive.append(snapshot)
+            if is_snapshot:
+                previous_snapshot = snapshot
+            previous = snapshot
+            previous_is_snapshot = is_snapshot
+        if last_consecutive_last:
+            steps[-1].append(
+                self.render_expressions([last_consecutive_last, *consecutive])
+            )
+        elif len(consecutive) > 0:
+            steps[-1].append(self.render_expressions(consecutive))
+        filtered_steps = []
+        for step in steps:
+            cleaned = [substep for substep in step if substep != ""]
+            if cleaned:
+                filtered_steps.append(cleaned)
+
+        document_steps: list[dict[str, Any]] = []
+        for i, step in enumerate(filtered_steps, 1):
+            body = newline.join(step)
+            document_steps.append(
+                {
+                    "index": i,
+                    "heading": _step_heading(i),
+                    "substeps": step,
+                    "body": body,
+                }
+            )
+        rendered = self.render()
+        return {
+            "schema_version": "explanation_document_v1",
+            "solve_status": self.solve_status,
+            "reason_code": self.reason_code,
+            "is_approximate": self.is_approximate,
+            "coverage_tags": sorted(self.coverage_tags),
+            "steps": document_steps,
+            "rendered": rendered,
+        }
+
+    def render_json(self, indent: Optional[int] = 2) -> str:
+        return json.dumps(self.render_document(), ensure_ascii=False, indent=indent)
 
     def render_explanation_events(self):
         if len(self.explanation_events) == 0:
@@ -1131,6 +1316,34 @@ def multiply(a, b, context: EvaluatorContext, quick_compute=True):
     ):
         context.snap(Product([a, b]), a * b)
         return a * b
+    threshold = context.options.order_of_magnitude_threshold
+    if threshold is not None and is_int_or_float(a) and is_int_or_float(b):
+        estimated_digits = _numeric_complexity(a) + _numeric_complexity(b)
+        if estimated_digits > threshold:
+            sign = -1 if ((a < 0) ^ (b < 0)) else 1
+            approx_expr = _order_of_magnitude_expression(estimated_digits - 1, sign)
+            context.set_status("partial", "order_of_magnitude_estimation")
+            digits_a = _numeric_complexity(a)
+            digits_b = _numeric_complexity(b)
+            context.snap(
+                f"Exact multiplication is too large, so estimate by digit count.",
+                False,
+            )
+            context.snap(
+                f"${a}$ has about {digits_a} digits and ${b}$ has about {digits_b} digits.",
+                False,
+            )
+            context.snap(
+                f"A product of numbers with {digits_a} and {digits_b} digits has about {estimated_digits - 1} to {estimated_digits} digits.",
+                False,
+            )
+            context.snap(
+                Product([a, b]),
+                approx_expr,
+                f"So we use an order-of-magnitude estimate of ${render_latex(approx_expr)}$.",
+                approximate=True,
+            )
+            return approx_expr
     quick_result = a * b
     if _should_use_calculator_for_binary(
         context,
@@ -2507,6 +2720,41 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                         False,
                     )
                     return expression
+                threshold = context.options.order_of_magnitude_threshold
+                estimated_digits = _estimate_power_result_complexity(base, exponent)
+                if (
+                    threshold is not None
+                    and estimated_digits is not None
+                    and estimated_digits > threshold
+                ):
+                    exponent_int = int(exponent)
+                    sign = -1 if (base < 0 and exponent_int % 2 != 0) else 1
+                    approx_expr = _order_of_magnitude_expression(
+                        estimated_digits - 1, sign
+                    )
+                    abs_base = abs(float(base))
+                    log10_base = math.log10(abs_base) if abs_base > 0 else 0.0
+                    scaled = exponent_int * log10_base
+                    context.set_status("partial", "order_of_magnitude_estimation")
+                    context.snap(
+                        "Exact exponentiation is too large, so estimate using base-10 logarithms.",
+                        False,
+                    )
+                    context.snap(
+                        f"$\\log_{{10}}(|{base}^{{{exponent_int}}}|) = {exponent_int}\\cdot\\log_{{10}}(|{base}|)$.",
+                        False,
+                    )
+                    context.snap(
+                        f"$\\log_{{10}}(|{base}|) \\approx {log10_base:.6g}$, so $\\log_{{10}}(|{base}^{{{exponent_int}}}|) \\approx {scaled:.6g}$.",
+                        False,
+                    )
+                    context.snap(
+                        expression,
+                        approx_expr,
+                        f"So we use an order-of-magnitude estimate of ${render_latex(approx_expr)}$.",
+                        approximate=True,
+                    )
+                    return approx_expr
                 if _should_use_calculator_for_power(context, base, exponent):
                     try:
                         result = base**exponent
@@ -2998,10 +3246,11 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
 
 def evaluate(
     expression: Numerical,
-    substitutions: dict[str, int | float] = {},
+    substitutions: Optional[dict[str, int | float]] = None,
     error_on_invalid_snap: bool = True,
     options: Optional[EvaluatorOptions] = None,
 ):
+    substitutions = substitutions or {}
     context = EvaluatorContext(
         expression,
         substitutions,

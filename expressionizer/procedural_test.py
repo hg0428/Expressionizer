@@ -8,12 +8,15 @@ import traceback
 from dataclasses import asdict, dataclass
 from typing import Any
 
-import numpy as np
-
 from .evaluator import EvaluatorOptions, WordingOptions, compact_evaluator_options, evaluate
-from .localization import ExplanationProfile, load_message_overrides
+from .localization import (
+    ExplanationProfile,
+    build_explanation_profile,
+    load_message_overrides,
+    supported_profile_presets,
+)
 from .equation_generation import generate_random_equation_problem
-from .procedural import FUNCTIONS, ExpressionContext, generate_random_expression
+from .procedural import FUNCTIONS, ExpressionContext, generate_random_expression, seed_generation
 from .render import render_latex
 from .solve_equation import EquationWordingOptions, solve_equation, solve_system
 from .validation import (
@@ -59,26 +62,27 @@ def _compare_with_sympy_timeout(
 @dataclass
 class CaseProfile:
     name: str
-    difficulty: str
+    complexity: float
     guarantee_solvable: bool
 
 
-def _build_profiles(mode: str, difficulty_cycle: list[str]) -> list[CaseProfile]:
+def _build_profiles(mode: str, complexity_cycle: list[float]) -> list[CaseProfile]:
     profiles: list[CaseProfile] = []
-    for difficulty in difficulty_cycle:
+    for complexity in complexity_cycle:
+        label = f"c{complexity:.2f}"
         if mode in ("always", "mixed"):
             profiles.append(
                 CaseProfile(
-                    name=f"{difficulty}_solvable",
-                    difficulty=difficulty,
+                    name=f"{label}_solvable",
+                    complexity=complexity,
                     guarantee_solvable=True,
                 )
             )
         if mode in ("never", "mixed"):
             profiles.append(
                 CaseProfile(
-                    name=f"{difficulty}_unspecified",
-                    difficulty=difficulty,
+                    name=f"{label}_unspecified",
+                    complexity=complexity,
                     guarantee_solvable=False,
                 )
             )
@@ -109,11 +113,13 @@ def _render_solution(values: dict[str, Any]) -> str:
 def _build_eval_options(payload: dict[str, Any]) -> EvaluatorOptions:
     wording_style = payload.get("wording_style", "verbose")
     step_heading_template = payload.get("step_heading_template", "## {number}")
-    explanation_profile = ExplanationProfile(
+    explanation_profile = build_explanation_profile(
+        payload.get("profile_preset"),
         locale=payload.get("locale", "en"),
         style_type=payload.get("style_type", "default"),
         message_overrides=payload.get("message_overrides", {}),
         exact_text_overrides=payload.get("exact_text_overrides", {}),
+        collect_diagnostics=payload.get("collect_localization_diagnostics", False),
     )
     if payload.get("compact_explanations", False):
         options = compact_evaluator_options(
@@ -131,8 +137,7 @@ def _build_eval_options(payload: dict[str, Any]) -> EvaluatorOptions:
 
 def _worker(payload: dict[str, Any], output_queue: Any):
     seed = payload["seed"]
-    random.seed(seed)
-    np.random.seed(seed)
+    seed_generation(seed)
 
     context = ExpressionContext()
     expr = None
@@ -140,14 +145,37 @@ def _worker(payload: dict[str, Any], output_queue: Any):
     started_at = time.time()
 
     try:
+        allowed_problem_families = {
+            "sum",
+            "product",
+            "power",
+            "function",
+            "derivative",
+            "integral",
+        }
+        allowed_equation_families = {"linear", "quadratic", "rational", "system"}
+        if payload.get("problem_families"):
+            invalid = sorted(
+                set(payload["problem_families"]) - allowed_problem_families
+            )
+            if invalid:
+                raise ValueError(f"Invalid problem_families: {', '.join(invalid)}")
+        if payload.get("equation_families"):
+            invalid = sorted(
+                set(payload["equation_families"]) - allowed_equation_families
+            )
+            if invalid:
+                raise ValueError(f"Invalid equation_families: {', '.join(invalid)}")
         eval_options = _build_eval_options(payload)
         equation_wording = EquationWordingOptions(
             step_heading_template=payload.get("step_heading_template", "## {number}"),
-            explanation_profile=ExplanationProfile(
+            explanation_profile=build_explanation_profile(
+                payload.get("profile_preset"),
                 locale=payload.get("locale", "en"),
                 style_type=payload.get("style_type", "default"),
                 message_overrides=payload.get("message_overrides", {}),
                 exact_text_overrides=payload.get("exact_text_overrides", {}),
+                collect_diagnostics=payload.get("collect_localization_diagnostics", False),
             ),
         )
         mode = payload.get("equation_mode", "expressions")
@@ -155,8 +183,9 @@ def _worker(payload: dict[str, Any], output_queue: Any):
             mode == "equations" or random.random() < 0.5
         ):
             expr, variables, generated_kind = generate_random_equation_problem(
-                difficulty=payload["difficulty"],
+                complexity=payload["complexity"],
                 mode="mixed",
+                equation_families=payload.get("equation_families"),
             )
             if generated_kind in ("equation", "quadratic_equation", "rational_equation"):
                 solution, solve_context = solve_equation(
@@ -208,12 +237,13 @@ def _worker(payload: dict[str, Any], output_queue: Any):
                 allow_calculus=payload["allow_calculus"],
                 allow_definite_integrals=payload["allow_definite_integrals"],
                 max_derivative_order=payload["max_derivative_order"],
-                difficulty=payload["difficulty"],
+                complexity=payload["complexity"],
                 guarantee_solvable=payload["guarantee_solvable"],
                 generation_profile=payload.get("generation_profile", "realistic"),
                 solvability_mode=payload.get("solvability_mode", "mixed"),
                 unsolvable_probability=payload.get("unsolvable_probability", 0.12),
                 hard_problem_probability=payload.get("hard_problem_probability", 0.2),
+                problem_families=payload.get("problem_families"),
                 context=context,
             )
             substitutions = context.substitutions.copy()
@@ -272,6 +302,12 @@ def _worker(payload: dict[str, Any], output_queue: Any):
                 else _render_solution(answer),
                 "solve_status": solve_status,
                 "reason_code": reason_code,
+                "intended_unsolvable_reason": getattr(
+                    context, "intended_unsolvable_reason", None
+                ),
+                "generated_problem_family": getattr(
+                    context, "generated_problem_family", None
+                ),
                 "coverage_tags": sorted(getattr(eval_context, "coverage_tags", set()))
                 if "eval_context" in locals()
                 else [],
@@ -280,6 +316,16 @@ def _worker(payload: dict[str, Any], output_queue: Any):
                 else 0,
                 "reasoning_check": reasoning_check,
                 "sympy_check": sympy_check,
+                "localization_diagnostics": getattr(
+                    eval_context, "localization_diagnostics", {}
+                )
+                if "eval_context" in locals()
+                else (
+                    solve_context.localizer.diagnostics()
+                    if "solve_context" in locals()
+                    and getattr(solve_context, "localizer", None) is not None
+                    else {}
+                ),
             }
         )
     except Exception as exc:
@@ -368,7 +414,7 @@ def _print_failure_and_repro(result: dict[str, Any], args: argparse.Namespace):
         + f"--timeout-seconds {args.timeout_seconds} "
         + f"--max-depth {args.max_depth} "
         + f"--guarantee-solvable-mode {args.guarantee_solvable_mode} "
-        + f"--difficulty-cycle {','.join(args.difficulty_cycle)} "
+        + f"--complexity-cycle {','.join(str(v) for v in args.complexity_cycle)} "
         + f"--equation-mode {args.equation_mode} "
         + f"--generation-profile {args.generation_profile} "
         + f"--solvability-mode {args.solvability_mode} "
@@ -379,6 +425,26 @@ def _print_failure_and_repro(result: dict[str, Any], args: argparse.Namespace):
         + f"--step-heading-template {json.dumps(args.step_heading_template)} "
         + f"--locale {args.locale} "
         + f"--style-type {args.style_type} "
+        + (
+            f"--profile-preset {json.dumps(args.profile_preset)} "
+            if args.profile_preset
+            else ""
+        )
+        + (
+            "--collect-localization-diagnostics "
+            if args.collect_localization_diagnostics
+            else ""
+        )
+        + (
+            f"--problem-families {json.dumps(','.join(args.problem_families))} "
+            if args.problem_families
+            else ""
+        )
+        + (
+            f"--equation-families {json.dumps(','.join(args.equation_families))} "
+            if args.equation_families
+            else ""
+        )
         + (f"--messages-file {json.dumps(args.messages_file)} " if args.messages_file else "")
         + (
             f"--exact-text-overrides-file {json.dumps(args.exact_text_overrides_file)}"
@@ -444,10 +510,10 @@ def main():
         help="How to set guarantee_solvable across test profiles.",
     )
     parser.add_argument(
-        "--difficulty-cycle",
-        type=lambda s: [p.strip() for p in s.split(",") if p.strip()],
-        default=["beginner", "intermediate", "advanced"],
-        help="Comma-separated profile cycle of difficulties.",
+        "--complexity-cycle",
+        type=lambda s: [float(p.strip()) for p in s.split(",") if p.strip()],
+        default=[0.2, 0.5, 0.8],
+        help="Comma-separated profile cycle of complexity values in [0, 1].",
     )
     parser.add_argument(
         "--report-every",
@@ -526,6 +592,30 @@ def main():
         help="Built-in rendering style overlay.",
     )
     parser.add_argument(
+        "--profile-preset",
+        choices=supported_profile_presets(),
+        default=None,
+        help="Optional preset bundle for locale/style defaults.",
+    )
+    parser.add_argument(
+        "--collect-localization-diagnostics",
+        action="store_true",
+        default=False,
+        help="Collect key usage/fallback diagnostics while rendering explanations.",
+    )
+    parser.add_argument(
+        "--problem-families",
+        type=lambda s: [p.strip() for p in s.split(",") if p.strip()],
+        default=None,
+        help="Comma-separated expression families: sum,product,power,function,derivative,integral",
+    )
+    parser.add_argument(
+        "--equation-families",
+        type=lambda s: [p.strip() for p in s.split(",") if p.strip()],
+        default=None,
+        help="Comma-separated equation families: linear,quadratic,rational,system",
+    )
+    parser.add_argument(
         "--messages-file",
         type=str,
         default=None,
@@ -538,6 +628,22 @@ def main():
         help="Optional JSON map for exact text replacement overrides.",
     )
     args = parser.parse_args()
+    if any(v < 0.0 or v > 1.0 for v in args.complexity_cycle):
+        raise ValueError("--complexity-cycle values must be in [0, 1].")
+    if not (0.0 <= args.unsolvable_probability <= 1.0):
+        raise ValueError("--unsolvable-probability must be in [0, 1].")
+    if not (0.0 <= args.hard_problem_probability <= 1.0):
+        raise ValueError("--hard-problem-probability must be in [0, 1].")
+    if args.problem_families:
+        allowed = {"sum", "product", "power", "function", "derivative", "integral"}
+        invalid = sorted(set(args.problem_families) - allowed)
+        if invalid:
+            raise ValueError(f"Invalid --problem-families values: {', '.join(invalid)}")
+    if args.equation_families:
+        allowed = {"linear", "quadratic", "rational", "system"}
+        invalid = sorted(set(args.equation_families) - allowed)
+        if invalid:
+            raise ValueError(f"Invalid --equation-families values: {', '.join(invalid)}")
     message_overrides = (
         load_message_overrides(args.messages_file) if args.messages_file else {}
     )
@@ -547,7 +653,7 @@ def main():
         else {}
     )
 
-    profiles = _build_profiles(args.guarantee_solvable_mode, args.difficulty_cycle)
+    profiles = _build_profiles(args.guarantee_solvable_mode, args.complexity_cycle)
     if len(profiles) == 0:
         raise ValueError("No profiles configured.")
 
@@ -566,7 +672,7 @@ def main():
         payload = {
             "seed": seed,
             "profile_name": profile.name,
-            "difficulty": profile.difficulty,
+            "complexity": profile.complexity,
             "guarantee_solvable": profile.guarantee_solvable,
             "max_depth": args.max_depth,
             "allow_calculus": args.allow_calculus,
@@ -584,6 +690,10 @@ def main():
             "step_heading_template": args.step_heading_template,
             "locale": args.locale,
             "style_type": args.style_type,
+            "profile_preset": args.profile_preset,
+            "collect_localization_diagnostics": args.collect_localization_diagnostics,
+            "problem_families": args.problem_families,
+            "equation_families": args.equation_families,
             "message_overrides": message_overrides,
             "exact_text_overrides": exact_text_overrides,
         }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from fractions import Fraction
+import json
 import re
 from typing import Optional
 
@@ -36,6 +37,11 @@ class EquationSolveContext:
     def add_step(self, text: str):
         if self.localizer is not None:
             text = self.localizer.transform_text(text)
+        cleaned = text.strip()
+        if not cleaned:
+            return
+        if len(self.steps) > 0 and self.steps[-1].strip() == cleaned:
+            return
         self.steps.append(text)
 
     def set_status(self, solve_status: str, reason_code: Optional[str] = None):
@@ -44,6 +50,16 @@ class EquationSolveContext:
 
     def render(self) -> str:
         if not self.steps:
+            return ""
+        normalized_steps: list[str] = []
+        for step in self.steps:
+            stripped = step.strip()
+            if not stripped:
+                continue
+            if len(normalized_steps) > 0 and normalized_steps[-1].strip() == stripped:
+                continue
+            normalized_steps.append(step)
+        if not normalized_steps:
             return ""
         newline = (
             self.localizer.template("render.newline", "\n")
@@ -66,7 +82,7 @@ class EquationSolveContext:
             else ""
         )
         blocks: list[str] = []
-        for index, step in enumerate(self.steps, 1):
+        for index, step in enumerate(normalized_steps, 1):
             template = self.step_heading_template
             if self.localizer is not None:
                 template = self.localizer.template(
@@ -93,6 +109,48 @@ class EquationSolveContext:
                 block = f"{heading}{newline}{step}"
             blocks.append(block)
         return document_prefix + step_joiner.join(blocks) + document_suffix
+
+    def render_document(self) -> dict[str, object]:
+        normalized_steps: list[str] = []
+        for step in self.steps:
+            stripped = step.strip()
+            if not stripped:
+                continue
+            if len(normalized_steps) > 0 and normalized_steps[-1].strip() == stripped:
+                continue
+            normalized_steps.append(step)
+
+        rendered_steps: list[dict[str, object]] = []
+        for index, step in enumerate(normalized_steps, 1):
+            template = self.step_heading_template
+            if self.localizer is not None:
+                template = self.localizer.template(
+                    "step.heading",
+                    template,
+                    prefer_default=self.prefer_step_heading_template,
+                )
+            try:
+                heading = template.format(number=index)
+            except Exception:
+                heading = f"## {index}"
+            rendered_steps.append(
+                {
+                    "index": index,
+                    "heading": heading,
+                    "substeps": [step],
+                    "body": step,
+                }
+            )
+        return {
+            "schema_version": "explanation_document_v1",
+            "solve_status": self.solve_status,
+            "reason_code": self.reason_code,
+            "steps": rendered_steps,
+            "rendered": self.render(),
+        }
+
+    def render_json(self, indent: Optional[int] = 2) -> str:
+        return json.dumps(self.render_document(), ensure_ascii=False, indent=indent)
 
 
 @dataclass

@@ -7,7 +7,9 @@ expressionizer/equation_manual_review_cases.py
 expressionizer/evaluator.py
 expressionizer/explanation_audit.py
 expressionizer/expression.py
+expressionizer/language_packs.py
 expressionizer/localization.py
+expressionizer/localization_catalog.py
 expressionizer/manual_review_cases.py
 expressionizer/number_format.py
 expressionizer/procedural.py

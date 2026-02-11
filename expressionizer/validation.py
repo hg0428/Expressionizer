@@ -489,6 +489,31 @@ def validate_reasoning_steps(eval_context: Any, expected_result: Any) -> dict[st
         failures.append({"type": "rendered_explanation_contains_none"})
     if "+ -" in rendered:
         failures.append({"type": "rendered_sign_artifact_plus_negative"})
+    if "[[" in rendered and "]]" in rendered:
+        failures.append({"type": "rendered_unresolved_localization_markers"})
+
+    # Lightweight quality lints for repetitive/awkward output.
+    lines = [line.strip() for line in rendered.splitlines() if line.strip()]
+    repeated_adjacent = 0
+    for i in range(1, len(lines)):
+        if lines[i] == lines[i - 1]:
+            repeated_adjacent += 1
+    if repeated_adjacent > 0:
+        failures.append(
+            {
+                "type": "rendered_repeated_adjacent_lines",
+                "count": repeated_adjacent,
+            }
+        )
+    if len(lines) > 0:
+        unique_ratio = len(set(lines)) / len(lines)
+        if unique_ratio < 0.45:
+            notes.append(
+                {
+                    "type": "rendered_low_unique_line_ratio",
+                    "ratio": round(unique_ratio, 4),
+                }
+            )
 
     return {
         "valid": len(failures) == 0,

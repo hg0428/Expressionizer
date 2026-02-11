@@ -9,10 +9,15 @@ from .evaluator import (
     evaluate,
     evaluate_expression,
 )
-from .localization import ExplanationProfile
+from .localization import (
+    ExplanationProfile,
+    build_explanation_profile,
+    supported_profile_presets,
+)
 from .expression import *
 from .equation_generation import generate_random_equation_problem
 from .language_packs import (
+    get_builtin_messages,
     locale_equal_to_english_keys,
     supported_locales,
     supported_style_types,
@@ -20,7 +25,7 @@ from .language_packs import (
 )
 from .localization_catalog import collect_catalog, validate_locale_packs
 from .render import render_latex
-from .procedural import FUNCTIONS, ExpressionContext, generate_random_expression
+from .procedural import FUNCTIONS, ExpressionContext, generate_random_expression, seed_generation
 from .solve_equation import EquationWordingOptions, solve_equation, solve_system
 from .validation import validate_equation_solution, validate_system_solution
 
@@ -434,11 +439,58 @@ def run_options_tests():
             [f"{locale}:{key}" for key in locale_equal_to_english_keys(locale)]
         )
     tests.append(("builtin locale full coverage (no english leakage)", len(untranslated) == 0))
+    he = get_builtin_messages("he", "default")
+    he_niqqud = get_builtin_messages("he-niqqud", "default")
+    he_diff_keys = [
+        key
+        for key in sorted(set(he) | set(he_niqqud))
+        if he.get(key) != he_niqqud.get(key)
+    ]
+    tests.append(("he-niqqud differs from he on many keys", len(he_diff_keys) >= 20))
 
     catalog = collect_catalog()
     tests.append(("localization catalog has many keys", catalog.get("total_keys", 0) >= 80))
     catalog_validation_errors = validate_locale_packs()
     tests.append(("catalog-driven locale validation", len(catalog_validation_errors) == 0))
+    presets = supported_profile_presets()
+    tests.append(("profile presets include xml-research", "xml-research" in presets))
+    preset_profile = build_explanation_profile("xml-research", locale="es")
+    tests.append(("profile preset allows overrides", preset_profile.locale == "es" and preset_profile.style_type == "xml"))
+    diag_options = EvaluatorOptions(
+        explanation_profile=ExplanationProfile(collect_diagnostics=True)
+    )
+    _, diag_ctx = evaluate(Sum([4, 7.90623]), options=diag_options, error_on_invalid_snap=False)
+    diag_ctx.render()
+    tests.append(
+        (
+            "localization diagnostics collected",
+            isinstance(diag_ctx.localization_diagnostics, dict)
+            and "counts" in diag_ctx.localization_diagnostics,
+        )
+    )
+    oom_options = EvaluatorOptions(order_of_magnitude_threshold=10)
+    oom_result, oom_ctx = evaluate(
+        power(9, 30),
+        options=oom_options,
+        error_on_invalid_snap=False,
+    )
+    tests.append(("order-of-magnitude threshold marks partial", oom_ctx.solve_status == "partial"))
+    tests.append(("order-of-magnitude threshold returns estimate expression", "10^" in render_latex(oom_result)))
+    tests.append(("order-of-magnitude threshold explanation text", "order-of-magnitude" in oom_ctx.render().lower()))
+    structured_doc = diag_ctx.render_document()
+    tests.append(
+        (
+            "evaluator structured render has steps",
+            isinstance(structured_doc.get("steps"), list)
+            and len(structured_doc.get("steps", [])) >= 1,
+        )
+    )
+    tests.append(
+        (
+            "evaluator render json serializes",
+            "\"steps\"" in diag_ctx.render_json(),
+        )
+    )
 
     return tests
 
@@ -676,7 +728,7 @@ def run_procedural_fuzz_tests():
                 max_depth=3,
                 allow_calculus=True,
                 guarantee_solvable=True,
-                difficulty="beginner",
+                complexity=0.2,
                 context=context,
             )
             substitutions = context.substitutions.copy()
@@ -696,10 +748,10 @@ def run_procedural_profile_tests():
     tests = []
 
     profiles = [
-        ("beginner_solvable", {"difficulty": "beginner", "guarantee_solvable": True}),
-        ("intermediate_solvable", {"difficulty": "intermediate", "guarantee_solvable": True}),
-        ("advanced_solvable", {"difficulty": "advanced", "guarantee_solvable": True}),
-        ("intermediate_unspecified", {"difficulty": "intermediate", "guarantee_solvable": False}),
+        ("c020_solvable", {"complexity": 0.2, "guarantee_solvable": True}),
+        ("c050_solvable", {"complexity": 0.5, "guarantee_solvable": True}),
+        ("c080_solvable", {"complexity": 0.8, "guarantee_solvable": True}),
+        ("c050_unspecified", {"complexity": 0.5, "guarantee_solvable": False}),
     ]
 
     for profile_name, params in profiles:
@@ -739,6 +791,30 @@ def run_procedural_profile_tests():
             )
         )
 
+    # Deterministic generation should be stable for same seed + config.
+    seed_generation(424242)
+    ctx_a = ExpressionContext()
+    expr_a = generate_random_expression(
+        max_depth=4,
+        allow_calculus=True,
+        solvability_mode="mixed",
+        unsolvable_probability=0.2,
+        complexity=0.55,
+        context=ctx_a,
+    )
+    seed_generation(424242)
+    ctx_b = ExpressionContext()
+    expr_b = generate_random_expression(
+        max_depth=4,
+        allow_calculus=True,
+        solvability_mode="mixed",
+        unsolvable_probability=0.2,
+        complexity=0.55,
+        context=ctx_b,
+    )
+    tests.append(("deterministic generation expression stable", render_latex(expr_a) == render_latex(expr_b)))
+    tests.append(("deterministic generation substitutions stable", ctx_a.substitutions == ctx_b.substitutions))
+
     return tests
 
 
@@ -755,7 +831,7 @@ def run_procedural_solvability_mode_tests():
                 allow_calculus=True,
                 allow_definite_integrals=True,
                 max_derivative_order=2,
-                difficulty="intermediate",
+                complexity=0.5,
                 guarantee_solvable=False,
                 generation_profile="realistic",
                 solvability_mode=mode,
@@ -781,6 +857,33 @@ def run_procedural_solvability_mode_tests():
         (
             "solvability mode ordering",
             solvable_rate <= mixed_rate <= unsolvable_rate,
+        )
+    )
+    family_context = ExpressionContext()
+    family_expr = generate_random_expression(
+        max_depth=4,
+        allow_calculus=True,
+        complexity=0.5,
+        generation_profile="realistic",
+        solvability_mode="solvable",
+        problem_families=["derivative"],
+        context=family_context,
+    )
+    tests.append(("problem family derivative constraint", isinstance(family_expr, Derivative)))
+
+    uns_context = ExpressionContext()
+    _ = generate_random_expression(
+        max_depth=4,
+        complexity=0.5,
+        generation_profile="realistic",
+        solvability_mode="unsolvable",
+        context=uns_context,
+    )
+    tests.append(
+        (
+            "unsolvable generation tags intended reason",
+            isinstance(uns_context.intended_unsolvable_reason, str)
+            and len(uns_context.intended_unsolvable_reason) > 0,
         )
     )
     return tests
@@ -919,6 +1022,14 @@ def run_equation_solver_tests():
     tests.append(("fractional linear status exact", fraction_sol.status == "exact"))
     tests.append(("fractional linear exact value", _equal_result(fraction_sol.values.get("x"), -53 / 26)))
     tests.append(("fractional linear explanation shows approx", "\\approx" in fraction_ctx.render()))
+    eq_doc = fraction_ctx.render_document()
+    tests.append(
+        (
+            "equation structured render has steps",
+            isinstance(eq_doc.get("steps"), list) and len(eq_doc.get("steps", [])) >= 1,
+        )
+    )
+    tests.append(("equation render json serializes", "\"steps\"" in fraction_ctx.render_json()))
 
     return tests
 
@@ -934,7 +1045,7 @@ def run_equation_procedural_tests():
     for _ in range(total):
         try:
             problem, variables, kind = generate_random_equation_problem(
-                difficulty=random.choice(["beginner", "intermediate", "advanced"]),
+                complexity=random.choice([0.2, 0.5, 0.8]),
                 mode="mixed",
             )
             if kind in ("equation", "quadratic_equation", "rational_equation"):
@@ -959,6 +1070,15 @@ def run_equation_procedural_tests():
     tests.append(("equation procedural generated equation cases", produced_equation > 0))
     tests.append(("equation procedural generated system cases", produced_system > 0))
     tests.append(("equation procedural sympy equivalence count", sympy_equivalent >= int(total * 0.6)))
+    constrained_kinds = set()
+    for _ in range(20):
+        _, _, kind = generate_random_equation_problem(
+            complexity=0.5,
+            mode="mixed",
+            equation_families=["quadratic"],
+        )
+        constrained_kinds.add(kind)
+    tests.append(("equation family constraint quadratic", constrained_kinds == {"quadratic_equation"}))
     return tests
 
 

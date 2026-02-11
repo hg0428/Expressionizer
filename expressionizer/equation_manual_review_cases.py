@@ -1,10 +1,15 @@
 import argparse
 import random
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from .equation_generation import generate_random_equation_problem
-from .localization import ExplanationProfile, Localizer, load_message_overrides
+from .localization import (
+    Localizer,
+    build_explanation_profile,
+    load_message_overrides,
+    supported_profile_presets,
+)
 from .render import render_latex
 from .solve_equation import EquationWordingOptions, solve_equation, solve_system
 
@@ -30,24 +35,34 @@ def _build_case(
     step_heading_template: str,
     locale: str,
     style_type: str,
+    profile_preset: Optional[str],
+    collect_localization_diagnostics: bool,
+    equation_families: Optional[list[str]],
     message_overrides: dict[str, str],
     exact_text_overrides: dict[str, str],
 ) -> dict[str, Any]:
-    difficulty_cycle = ["beginner", "intermediate", "advanced"]
-    difficulty = difficulty_cycle[case_index % len(difficulty_cycle)]
+    complexity_cycle = [0.2, 0.5, 0.8]
+    complexity = complexity_cycle[case_index % len(complexity_cycle)]
     random.seed(base_seed + case_index)
 
+    generator_mode = mode
+    if mode in ("linear", "quadratic", "rational"):
+        generator_mode = "equation"
+        equation_families = [mode]
     expr, variables, generated_kind = generate_random_equation_problem(
-        difficulty=difficulty,
-        mode=mode,
+        complexity=complexity,
+        mode=generator_mode,
+        equation_families=equation_families,
     )
     wording = EquationWordingOptions(
         step_heading_template=step_heading_template,
-        explanation_profile=ExplanationProfile(
+        explanation_profile=build_explanation_profile(
+            profile_preset,
             locale=locale,
             style_type=style_type,
             message_overrides=message_overrides,
             exact_text_overrides=exact_text_overrides,
+            collect_diagnostics=collect_localization_diagnostics,
         ),
     )
 
@@ -67,12 +82,15 @@ def _build_case(
     return {
         "index": case_index + 1,
         "seed": base_seed + case_index,
-        "difficulty": difficulty,
+        "complexity": complexity,
         "kind": generated_kind,
         "problem_latex": render_latex(expr),
         "answer": _render_solution(solution.values),
         "solve_status": solution.status,
         "reason_code": solution.reason_code if solution.reason_code is not None else "-",
+        "localization_diagnostics": solve_context.localizer.diagnostics()
+        if solve_context.localizer is not None
+        else {},
         "explanation": solve_context.render(),
     }
 
@@ -88,11 +106,11 @@ def _render_markdown(cases: list[dict[str, Any]], localizer: Localizer) -> str:
         lines.append(
             localizer.format(
                 "equation_manual_review.case_heading",
-                "## [[equation_manual_review.case]] {index} (seed={seed}, difficulty={difficulty}, kind={kind})",
+                "## [[equation_manual_review.case]] {index} (seed={seed}, complexity={complexity}, kind={kind})",
                 {
                     "index": case["index"],
                     "seed": case["seed"],
-                    "difficulty": case["difficulty"],
+                    "complexity": case["complexity"],
                     "kind": case["kind"],
                 },
             )
@@ -153,6 +171,22 @@ def main() -> int:
         choices=["default", "compact", "plain", "xml"],
         default="default",
     )
+    parser.add_argument(
+        "--profile-preset",
+        choices=supported_profile_presets(),
+        default=None,
+    )
+    parser.add_argument(
+        "--collect-localization-diagnostics",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--equation-families",
+        type=lambda s: [p.strip() for p in s.split(",") if p.strip()],
+        default=None,
+        help="Comma-separated equation families: linear,quadratic,rational,system",
+    )
     parser.add_argument("--messages-file", type=str, default=None)
     parser.add_argument("--exact-text-overrides-file", type=str, default=None)
     parser.add_argument(
@@ -162,6 +196,11 @@ def main() -> int:
         help="Output markdown path (repo-relative or absolute).",
     )
     args = parser.parse_args()
+    if args.equation_families:
+        allowed = {"linear", "quadratic", "rational", "system"}
+        invalid = sorted(set(args.equation_families) - allowed)
+        if invalid:
+            raise ValueError(f"Invalid --equation-families values: {', '.join(invalid)}")
     message_overrides = (
         load_message_overrides(args.messages_file) if args.messages_file else {}
     )
@@ -181,6 +220,9 @@ def main() -> int:
                 step_heading_template=args.step_heading_template,
                 locale=args.locale,
                 style_type=args.style_type,
+                profile_preset=args.profile_preset,
+                collect_localization_diagnostics=args.collect_localization_diagnostics,
+                equation_families=args.equation_families,
                 message_overrides=message_overrides,
                 exact_text_overrides=exact_text_overrides,
             )
@@ -192,11 +234,13 @@ def main() -> int:
         output = repo_root / output
 
     localizer = Localizer.from_profile(
-        ExplanationProfile(
+        build_explanation_profile(
+            args.profile_preset,
             locale=args.locale,
             style_type=args.style_type,
             message_overrides=message_overrides,
             exact_text_overrides=exact_text_overrides,
+            collect_diagnostics=args.collect_localization_diagnostics,
         )
     )
     output.write_text(_render_markdown(cases, localizer), encoding="utf-8")

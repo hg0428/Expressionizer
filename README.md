@@ -49,7 +49,7 @@ Expressionizer is currently in a **pre-stable (0.x)** phase.
   - Random variable name generation
   - Random number generation with constraints
   - Weighted random expression generation for testing/content generation
-  - Optional calculus generation controls (`allow_calculus`, `difficulty`, `guarantee_solvable`)
+  - Optional calculus generation controls (`allow_calculus`, `complexity`, `guarantee_solvable`)
 
 ## Installation
 
@@ -235,6 +235,30 @@ result, context = evaluate(
 - `missing_key_policy`: `fallback|marker|error` for unresolved localization keys
 - `message_overrides`: key-based template overrides (`key -> string`)
 - `exact_text_overrides`: exact-string overrides for legacy/unkeyed text (`text -> string`)
+- `collect_diagnostics`: collect localization key-usage/fallback diagnostics during rendering
+
+You can build profiles from named presets:
+
+```python
+from expressionizer import build_explanation_profile
+
+profile = build_explanation_profile(
+    "xml-research",
+    locale="es",  # optional override
+    collect_diagnostics=True,
+)
+```
+
+Preset names:
+
+- `default`
+- `compact-research`
+- `plain-research`
+- `xml-research`
+- `spanish-default`
+- `korean-default`
+- `hebrew-default`
+- `hebrew-niqqud-default`
 
 Defaults are production-safe:
 
@@ -365,6 +389,24 @@ _, context = evaluate(
 )
 ```
 
+Structured explanation output is also available for downstream pipelines:
+
+```python
+from expressionizer import evaluate, EvaluatorOptions
+
+_, context = evaluate(expr, substitutions=substitutions, options=EvaluatorOptions())
+doc = context.render_document()   # dict with solve metadata + normalized steps
+payload = context.render_json()   # JSON string form
+```
+
+Equation contexts support the same API:
+
+```python
+solution, solve_context = solve_equation(equation)
+eq_doc = solve_context.render_document()
+eq_json = solve_context.render_json()
+```
+
 Language-pack quality tooling:
 
 - `python -m expressionizer.localization_catalog --output localization_keys.json`
@@ -406,6 +448,20 @@ Available calculator placeholders include:
 Default behavior now includes calculator mode with practical thresholds so large numeric
 arithmetic does not produce excessively long place-value traces.
 
+Default behavior also enables order-of-magnitude estimation for very large numeric operations
+to prevent runaway explanation size. You can tune or disable it per call:
+
+```python
+from expressionizer import EvaluatorOptions, evaluate
+
+# Disable order-of-magnitude estimation (force exact behavior where possible)
+result, context = evaluate(
+    expr,
+    substitutions=substitutions,
+    options=EvaluatorOptions(order_of_magnitude_threshold=None),
+)
+```
+
 ### Choosing Profiles
 
 Expressionizer now supports two practical generation profiles:
@@ -435,6 +491,7 @@ For `0.8.x`, these configuration surfaces are intended to remain stable:
 - `WordingOptions`
 - `CalculatorModeOptions`
 - `generate_random_expression(..., generation_profile=...)`
+- `generate_random_expression(..., complexity=...)`
 - `generate_random_expression(..., solvability_mode=..., unsolvable_probability=..., hard_problem_probability=...)`
 - `ExplanationProfile` (per-call localization/customization layer)
 - CLI flags: `--generation-profile`, `--solvability-mode`, `--unsolvable-probability`, `--hard-problem-probability`, `--wording-style`, `--compact-explanations`, `--step-heading-template`, `--locale`, `--messages-file`, `--exact-text-overrides-file`
@@ -458,6 +515,8 @@ CLI tools also support:
 - `--step-heading-template "### Phase {number}"`
 - `--locale en`
 - `--style-type default|compact|plain|xml`
+- `--profile-preset <name>`
+- `--collect-localization-diagnostics`
 - `--messages-file path/to/messages.json`
 - `--exact-text-overrides-file path/to/exact_text_overrides.json`
 - `--generation-profile realistic|stress`
@@ -471,6 +530,12 @@ CLI tools also support:
   - used when `--solvability-mode mixed`
 - `--hard-problem-probability 0.2`
   - occasionally escalates a realistic problem into a harder variant
+- `--complexity-cycle 0.2,0.5,0.8`
+  - profile sweep for continuous generation complexity in stress/audit tools
+- `--problem-families sum,product,power,function,derivative,integral`
+  - constrain expression generation to selected structural families
+- `--equation-families linear,quadratic,rational,system`
+  - constrain equation generation to selected equation families
 
 ## Quality and Audit Utilities
 
@@ -482,9 +547,13 @@ CLI tools also support:
   - Generates user-facing manual-review samples with safer default complexity
 - `python -m expressionizer.manual_review_cases --cases 40 --solvability-mode mixed --unsolvable-probability 0.15`
   - Generates mixed datasets with both solvable and intentionally impossible cases
+- `python -m expressionizer.manual_review_cases --cases 40 --problem-families derivative,integral`
+  - Generates only selected expression families for focused review
 - `python -m expressionizer.equation_manual_review_cases --cases 40`
   - Generates a markdown set of equation/system explanations for manual review
   - Supports localization overrides with `--locale`, `--messages-file`, and `--exact-text-overrides-file`
+- `python -m expressionizer.equation_manual_review_cases --cases 40 --equation-families quadratic`
+  - Constrains generated equation cases to selected equation families
 - `python -m expressionizer.localization_catalog --validate-only`
   - Validates locale packs against catalog coverage + placeholder consistency
 - `python release_smoke.py`

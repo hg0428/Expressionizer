@@ -7,12 +7,14 @@ import time
 import traceback
 from typing import Any
 
-import numpy as np
-
 from .equation_generation import generate_random_equation_problem
 from .evaluator import EvaluatorOptions, WordingOptions, compact_evaluator_options, evaluate
-from .localization import ExplanationProfile, load_message_overrides
-from .procedural import FUNCTIONS, ExpressionContext, generate_random_expression
+from .localization import (
+    build_explanation_profile,
+    load_message_overrides,
+    supported_profile_presets,
+)
+from .procedural import FUNCTIONS, ExpressionContext, generate_random_expression, seed_generation
 from .render import render_latex
 from .solve_equation import EquationWordingOptions, solve_equation, solve_system
 from .validation import (
@@ -82,11 +84,13 @@ def _render_solution(values: dict[str, Any]) -> str:
 def _build_eval_options(payload: dict[str, Any]) -> EvaluatorOptions:
     wording_style = payload.get("wording_style", "verbose")
     step_heading_template = payload.get("step_heading_template", "## {number}")
-    explanation_profile = ExplanationProfile(
+    explanation_profile = build_explanation_profile(
+        payload.get("profile_preset"),
         locale=payload.get("locale", "en"),
         style_type=payload.get("style_type", "default"),
         message_overrides=payload.get("message_overrides", {}),
         exact_text_overrides=payload.get("exact_text_overrides", {}),
+        collect_diagnostics=payload.get("collect_localization_diagnostics", False),
     )
     if payload.get("compact_explanations", False):
         options = compact_evaluator_options(
@@ -104,9 +108,8 @@ def _build_eval_options(payload: dict[str, Any]) -> EvaluatorOptions:
 
 def _audit_worker(payload: dict[str, Any], output_queue: Any):
     seed = payload["seed"]
-    random.seed(seed)
-    np.random.seed(seed)
-    difficulty = payload["difficulty"]
+    seed_generation(seed)
+    complexity = payload["complexity"]
     guarantee_solvable = payload["guarantee_solvable"]
 
     context = ExpressionContext()
@@ -114,14 +117,37 @@ def _audit_worker(payload: dict[str, Any], output_queue: Any):
     substitutions = None
     started_at = time.time()
     try:
+        allowed_problem_families = {
+            "sum",
+            "product",
+            "power",
+            "function",
+            "derivative",
+            "integral",
+        }
+        allowed_equation_families = {"linear", "quadratic", "rational", "system"}
+        if payload.get("problem_families"):
+            invalid = sorted(
+                set(payload["problem_families"]) - allowed_problem_families
+            )
+            if invalid:
+                raise ValueError(f"Invalid problem_families: {', '.join(invalid)}")
+        if payload.get("equation_families"):
+            invalid = sorted(
+                set(payload["equation_families"]) - allowed_equation_families
+            )
+            if invalid:
+                raise ValueError(f"Invalid equation_families: {', '.join(invalid)}")
         eval_options = _build_eval_options(payload)
         equation_wording = EquationWordingOptions(
             step_heading_template=payload.get("step_heading_template", "## {number}"),
-            explanation_profile=ExplanationProfile(
+            explanation_profile=build_explanation_profile(
+                payload.get("profile_preset"),
                 locale=payload.get("locale", "en"),
                 style_type=payload.get("style_type", "default"),
                 message_overrides=payload.get("message_overrides", {}),
                 exact_text_overrides=payload.get("exact_text_overrides", {}),
+                collect_diagnostics=payload.get("collect_localization_diagnostics", False),
             ),
         )
         mode = payload.get("equation_mode", "expressions")
@@ -129,8 +155,9 @@ def _audit_worker(payload: dict[str, Any], output_queue: Any):
             mode == "equations" or random.random() < 0.5
         ):
             expr, variables, generated_kind = generate_random_equation_problem(
-                difficulty=difficulty,
+                complexity=complexity,
                 mode="mixed",
+                equation_families=payload.get("equation_families"),
             )
             if generated_kind in ("equation", "quadratic_equation", "rational_equation"):
                 solution, solve_context = solve_equation(
@@ -178,12 +205,13 @@ def _audit_worker(payload: dict[str, Any], output_queue: Any):
                 allow_calculus=payload["allow_calculus"],
                 allow_definite_integrals=payload["allow_definite_integrals"],
                 max_derivative_order=payload["max_derivative_order"],
-                difficulty=difficulty,
+                complexity=complexity,
                 guarantee_solvable=guarantee_solvable,
                 generation_profile=payload.get("generation_profile", "realistic"),
                 solvability_mode=payload.get("solvability_mode", "mixed"),
                 unsolvable_probability=payload.get("unsolvable_probability", 0.12),
                 hard_problem_probability=payload.get("hard_problem_probability", 0.2),
+                problem_families=payload.get("problem_families"),
                 context=context,
             )
             substitutions = context.substitutions.copy()
@@ -213,7 +241,7 @@ def _audit_worker(payload: dict[str, Any], output_queue: Any):
                 "status": "ok",
                 "seed": seed,
                 "index": payload["index"],
-                "difficulty": difficulty,
+                "complexity": complexity,
                 "guarantee_solvable": guarantee_solvable,
                 "duration_seconds": round(time.time() - started_at, 6),
                 "expression_latex": render_latex(expr),
@@ -223,6 +251,22 @@ def _audit_worker(payload: dict[str, Any], output_queue: Any):
                 "reasoning_check": reasoning_check,
                 "sympy_check": sympy_check,
                 "substitutions": _preview_substitutions(context.substitutions),
+                "intended_unsolvable_reason": getattr(
+                    context, "intended_unsolvable_reason", None
+                ),
+                "generated_problem_family": getattr(
+                    context, "generated_problem_family", None
+                ),
+                "localization_diagnostics": getattr(
+                    eval_context, "localization_diagnostics", {}
+                )
+                if "eval_context" in locals()
+                else (
+                    solve_context.localizer.diagnostics()
+                    if "solve_context" in locals()
+                    and getattr(solve_context, "localizer", None) is not None
+                    else {}
+                ),
             }
         )
     except Exception as exc:
@@ -231,7 +275,7 @@ def _audit_worker(payload: dict[str, Any], output_queue: Any):
                 "status": "error",
                 "seed": seed,
                 "index": payload["index"],
-                "difficulty": difficulty,
+                "complexity": complexity,
                 "guarantee_solvable": guarantee_solvable,
                 "duration_seconds": round(time.time() - started_at, 6),
                 "exception_type": type(exc).__name__,
@@ -259,7 +303,7 @@ def _run_case_with_timeout(payload: dict[str, Any], timeout_seconds: float) -> d
                     "status": "hang",
                     "seed": payload["seed"],
                     "index": payload["index"],
-                    "difficulty": payload["difficulty"],
+                    "complexity": payload["complexity"],
                     "guarantee_solvable": payload["guarantee_solvable"],
                     "timeout_seconds": timeout,
                 }
@@ -271,7 +315,7 @@ def _run_case_with_timeout(payload: dict[str, Any], timeout_seconds: float) -> d
                 "status": "error",
                 "seed": payload["seed"],
                 "index": payload["index"],
-                "difficulty": payload["difficulty"],
+                "complexity": payload["complexity"],
                 "guarantee_solvable": payload["guarantee_solvable"],
                 "exception_type": "NoWorkerOutput",
                 "exception_message": "Audit worker exited without output.",
@@ -314,9 +358,9 @@ def main() -> int:
     parser.add_argument("--base-seed", type=int, default=9001)
     parser.add_argument("--max-depth", type=int, default=4)
     parser.add_argument(
-        "--difficulty-cycle",
-        type=lambda s: [p.strip() for p in s.split(",") if p.strip()],
-        default=["beginner", "intermediate", "advanced"],
+        "--complexity-cycle",
+        type=lambda s: [float(p.strip()) for p in s.split(",") if p.strip()],
+        default=[0.2, 0.5, 0.8],
     )
     parser.add_argument("--allow-calculus", action="store_true", default=True)
     parser.add_argument("--allow-definite-integrals", action="store_true", default=True)
@@ -363,6 +407,26 @@ def main() -> int:
         default="default",
     )
     parser.add_argument(
+        "--profile-preset",
+        choices=supported_profile_presets(),
+        default=None,
+    )
+    parser.add_argument(
+        "--collect-localization-diagnostics",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--problem-families",
+        type=lambda s: [p.strip() for p in s.split(",") if p.strip()],
+        default=None,
+    )
+    parser.add_argument(
+        "--equation-families",
+        type=lambda s: [p.strip() for p in s.split(",") if p.strip()],
+        default=None,
+    )
+    parser.add_argument(
         "--messages-file",
         type=str,
         default=None,
@@ -373,6 +437,22 @@ def main() -> int:
         default=None,
     )
     args = parser.parse_args()
+    if any(v < 0.0 or v > 1.0 for v in args.complexity_cycle):
+        raise ValueError("--complexity-cycle values must be in [0, 1].")
+    if not (0.0 <= args.unsolvable_probability <= 1.0):
+        raise ValueError("--unsolvable-probability must be in [0, 1].")
+    if not (0.0 <= args.hard_problem_probability <= 1.0):
+        raise ValueError("--hard-problem-probability must be in [0, 1].")
+    if args.problem_families:
+        allowed = {"sum", "product", "power", "function", "derivative", "integral"}
+        invalid = sorted(set(args.problem_families) - allowed)
+        if invalid:
+            raise ValueError(f"Invalid --problem-families values: {', '.join(invalid)}")
+    if args.equation_families:
+        allowed = {"linear", "quadratic", "rational", "system"}
+        invalid = sorted(set(args.equation_families) - allowed)
+        if invalid:
+            raise ValueError(f"Invalid --equation-families values: {', '.join(invalid)}")
     message_overrides = (
         load_message_overrides(args.messages_file) if args.messages_file else {}
     )
@@ -392,13 +472,13 @@ def main() -> int:
 
     for index in range(args.cases):
         seed = args.base_seed + index
-        difficulty = args.difficulty_cycle[index % len(args.difficulty_cycle)]
+        complexity = args.complexity_cycle[index % len(args.complexity_cycle)]
         guarantee_solvable = (index % 2) == 0
 
         payload = {
             "index": index,
             "seed": seed,
-            "difficulty": difficulty,
+            "complexity": complexity,
             "guarantee_solvable": guarantee_solvable,
             "max_depth": args.max_depth,
             "allow_calculus": args.allow_calculus,
@@ -415,6 +495,10 @@ def main() -> int:
             "step_heading_template": args.step_heading_template,
             "locale": args.locale,
             "style_type": args.style_type,
+            "profile_preset": args.profile_preset,
+            "collect_localization_diagnostics": args.collect_localization_diagnostics,
+            "problem_families": args.problem_families,
+            "equation_families": args.equation_families,
             "message_overrides": message_overrides,
             "exact_text_overrides": exact_text_overrides,
         }
