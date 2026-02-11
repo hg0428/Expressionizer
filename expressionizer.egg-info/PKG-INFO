@@ -1,15 +1,15 @@
 Metadata-Version: 2.4
 Name: expressionizer
-Version: 0.8.0rc1
+Version: 0.8.0
 Summary: A Python library for symbolic math expressions and evaluation.
 Author-email: Hudson Gouge <hudson.gouge@icloud.com>
-License: MIT
+License-Expression: MIT
 Project-URL: Homepage, https://pypi.org/project/expressionizer/
 Classifier: Programming Language :: Python :: 3
-Classifier: License :: OSI Approved :: MIT License
 Classifier: Operating System :: OS Independent
 Requires-Python: >=3.8
 Description-Content-Type: text/markdown
+Requires-Dist: numpy
 
 # Expressionizer
 
@@ -219,6 +219,75 @@ result, context = evaluate(
 )
 ```
 
+For full per-call wording customization (including per-generation language/profile swaps),
+use `ExplanationProfile`:
+
+```python
+from expressionizer import EvaluatorOptions, ExplanationProfile, evaluate
+
+result, context = evaluate(
+    expr,
+    substitutions=substitutions,
+    options=EvaluatorOptions(
+        explanation_profile=ExplanationProfile(
+            locale="en",
+            missing_key_policy="fallback",
+            message_overrides={
+                "step.heading": "## Phase {number}",
+                "equation.unsupported_equation_arity": "Unsupported equation format.",
+            },
+        )
+    ),
+)
+```
+
+`ExplanationProfile` fields:
+
+- `locale`: logical locale tag (used for per-call routing and future locale packs)
+- `missing_key_policy`: `fallback|marker|error` for unresolved localization keys
+- `message_overrides`: key-based template overrides (`key -> string`)
+- `exact_text_overrides`: exact-string overrides for legacy/unkeyed text (`text -> string`)
+
+Defaults are production-safe:
+
+- if you do nothing, built-in evaluator/equation templates render normally
+- if you override only a few keys, only those keys change
+- set `missing_key_policy="error"` to require every encountered key be supplied in `message_overrides`
+- set `missing_key_policy="fallback"` (default) to use built-in safe defaults when a key is not overridden
+- set `missing_key_policy="marker"` to surface unresolved keys as `[[key]]` while debugging
+
+You can customize formatting structure too (not just wording), including heading style,
+step wrappers, separators, and line breaks:
+
+```python
+from expressionizer import EvaluatorOptions, ExplanationProfile, evaluate
+
+result, context = evaluate(
+    expr,
+    substitutions=substitutions,
+    options=EvaluatorOptions(
+        explanation_profile=ExplanationProfile(
+            message_overrides={
+                "step.heading": "Step {number}",
+                "render.newline": " | ",
+                "render.step.block": "[{heading}] {body}",
+                "render.step.joiner": " || ",
+            }
+        )
+    ),
+)
+```
+
+Template layering is supported with `{{other.key}}` references:
+
+```json
+{
+  "render.step.open": "<s{number}>",
+  "render.step.close": "</s{number}>",
+  "render.step.block": "{{render.step.open}}{newline}{body}{newline}{{render.step.close}}"
+}
+```
+
 For long numeric arithmetic, you can enable/configure calculator mode. This is useful for
 student-friendly readability and for AI training-data workflows that need tool-call placeholders:
 
@@ -249,6 +318,39 @@ Available calculator placeholders include:
 Default behavior now includes calculator mode with practical thresholds so large numeric
 arithmetic does not produce excessively long place-value traces.
 
+### Choosing Profiles
+
+Expressionizer now supports two practical generation profiles:
+
+- `realistic` (default): intended for user-facing outputs and classroom-style workflows
+  - tighter expression complexity bounds
+  - more predictable explanation length
+- `stress`: intended for robustness/fuzz testing
+  - broader expression shapes and higher complexity ceilings
+
+Use `realistic` for production user experiences, and `stress` for QA pipelines.
+
+You can also control whether generated expression problems are solvable:
+
+- `solvability_mode="solvable"`: intentionally avoids injected impossible/domain-invalid cases
+- `solvability_mode="mixed"` (default): mostly solvable, with occasional intentionally unsolvable problems
+- `solvability_mode="unsolvable"`: intentionally generates impossible/domain-invalid problems for negative examples
+
+For `mixed`, use `unsolvable_probability` to tune the share of impossible cases, and
+`hard_problem_probability` to occasionally promote a realistic case into a harder-but-still-bounded one.
+
+### API Stability Note
+
+For `0.8.x`, these configuration surfaces are intended to remain stable:
+
+- `EvaluatorOptions`
+- `WordingOptions`
+- `CalculatorModeOptions`
+- `generate_random_expression(..., generation_profile=...)`
+- `generate_random_expression(..., solvability_mode=..., unsolvable_probability=..., hard_problem_probability=...)`
+- `ExplanationProfile` (per-call localization/customization layer)
+- CLI flags: `--generation-profile`, `--solvability-mode`, `--unsolvable-probability`, `--hard-problem-probability`, `--wording-style`, `--compact-explanations`, `--step-heading-template`, `--locale`, `--messages-file`, `--exact-text-overrides-file`
+
 For compact output presets:
 
 ```python
@@ -266,9 +368,20 @@ CLI tools also support:
 - `--wording-style verbose|concise`
 - `--compact-explanations`
 - `--step-heading-template "### Phase {number}"`
+- `--locale en`
+- `--messages-file path/to/messages.json`
+- `--exact-text-overrides-file path/to/exact_text_overrides.json`
 - `--generation-profile realistic|stress`
   - `realistic` is user-facing and avoids extreme expression blowups
   - `stress` is broader/extreme for robustness testing
+- `--solvability-mode mixed|solvable|unsolvable`
+  - `mixed` is best for real-world distributions with some impossible examples
+  - `solvable` is best for student practice datasets where every case should resolve
+  - `unsolvable` is best for negative datasets teaching solvability detection
+- `--unsolvable-probability 0.12`
+  - used when `--solvability-mode mixed`
+- `--hard-problem-probability 0.2`
+  - occasionally escalates a realistic problem into a harder variant
 
 ## Quality and Audit Utilities
 
@@ -278,8 +391,11 @@ CLI tools also support:
   - Audits explanation consistency and optional SymPy equivalence
 - `python -m expressionizer.manual_review_cases --cases 40 --generation-profile realistic`
   - Generates user-facing manual-review samples with safer default complexity
+- `python -m expressionizer.manual_review_cases --cases 40 --solvability-mode mixed --unsolvable-probability 0.15`
+  - Generates mixed datasets with both solvable and intentionally impossible cases
 - `python -m expressionizer.equation_manual_review_cases --cases 40`
   - Generates a markdown set of equation/system explanations for manual review
+  - Supports localization overrides with `--locale`, `--messages-file`, and `--exact-text-overrides-file`
 - `python release_smoke.py`
   - Runs a quick pre-release local smoke check
 

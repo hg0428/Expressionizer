@@ -11,6 +11,7 @@ import numpy as np
 
 from .equation_generation import generate_random_equation_problem
 from .evaluator import EvaluatorOptions, WordingOptions, compact_evaluator_options, evaluate
+from .localization import ExplanationProfile, load_message_overrides
 from .procedural import FUNCTIONS, ExpressionContext, generate_random_expression
 from .render import render_latex
 from .solve_equation import EquationWordingOptions, solve_equation, solve_system
@@ -80,15 +81,23 @@ def _render_solution(values: dict[str, Any]) -> str:
 
 def _build_eval_options(payload: dict[str, Any]) -> EvaluatorOptions:
     wording_style = payload.get("wording_style", "verbose")
-    step_heading_template = payload.get("step_heading_template", "## Step {number}")
+    step_heading_template = payload.get("step_heading_template", "## {number}")
+    explanation_profile = ExplanationProfile(
+        locale=payload.get("locale", "en"),
+        message_overrides=payload.get("message_overrides", {}),
+        exact_text_overrides=payload.get("exact_text_overrides", {}),
+    )
     if payload.get("compact_explanations", False):
-        return compact_evaluator_options(
+        options = compact_evaluator_options(
             wording_style=wording_style,
             step_heading_template=step_heading_template,
         )
+        options.explanation_profile = explanation_profile
+        return options
     return EvaluatorOptions(
         wording_style=wording_style,
         wording_options=WordingOptions(step_heading_template=step_heading_template),
+        explanation_profile=explanation_profile,
     )
 
 
@@ -106,7 +115,12 @@ def _audit_worker(payload: dict[str, Any], output_queue: Any):
     try:
         eval_options = _build_eval_options(payload)
         equation_wording = EquationWordingOptions(
-            step_heading_template=payload.get("step_heading_template", "## Step {number}")
+            step_heading_template=payload.get("step_heading_template", "## {number}"),
+            explanation_profile=ExplanationProfile(
+                locale=payload.get("locale", "en"),
+                message_overrides=payload.get("message_overrides", {}),
+                exact_text_overrides=payload.get("exact_text_overrides", {}),
+            ),
         )
         mode = payload.get("equation_mode", "expressions")
         if mode in ("equations", "mixed") and (
@@ -165,6 +179,9 @@ def _audit_worker(payload: dict[str, Any], output_queue: Any):
                 difficulty=difficulty,
                 guarantee_solvable=guarantee_solvable,
                 generation_profile=payload.get("generation_profile", "realistic"),
+                solvability_mode=payload.get("solvability_mode", "mixed"),
+                unsolvable_probability=payload.get("unsolvable_probability", 0.12),
+                hard_problem_probability=payload.get("hard_problem_probability", 0.2),
                 context=context,
             )
             substitutions = context.substitutions.copy()
@@ -309,6 +326,13 @@ def main() -> int:
         default="realistic",
     )
     parser.add_argument(
+        "--solvability-mode",
+        choices=["mixed", "solvable", "unsolvable"],
+        default="mixed",
+    )
+    parser.add_argument("--unsolvable-probability", type=float, default=0.12)
+    parser.add_argument("--hard-problem-probability", type=float, default=0.2)
+    parser.add_argument(
         "--equation-mode",
         choices=["expressions", "equations", "mixed"],
         default="expressions",
@@ -328,9 +352,28 @@ def main() -> int:
     parser.add_argument(
         "--step-heading-template",
         type=str,
-        default="## Step {number}",
+        default="## {number}",
+    )
+    parser.add_argument("--locale", type=str, default="en")
+    parser.add_argument(
+        "--messages-file",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--exact-text-overrides-file",
+        type=str,
+        default=None,
     )
     args = parser.parse_args()
+    message_overrides = (
+        load_message_overrides(args.messages_file) if args.messages_file else {}
+    )
+    exact_text_overrides = (
+        load_message_overrides(args.exact_text_overrides_file)
+        if args.exact_text_overrides_file
+        else {}
+    )
 
     started = time.time()
     failures: list[dict[str, Any]] = []
@@ -357,9 +400,15 @@ def main() -> int:
             "sympy_compare": args.sympy_compare,
             "equation_mode": args.equation_mode,
             "generation_profile": args.generation_profile,
+            "solvability_mode": args.solvability_mode,
+            "unsolvable_probability": args.unsolvable_probability,
+            "hard_problem_probability": args.hard_problem_probability,
             "wording_style": args.wording_style,
             "compact_explanations": args.compact_explanations,
             "step_heading_template": args.step_heading_template,
+            "locale": args.locale,
+            "message_overrides": message_overrides,
+            "exact_text_overrides": exact_text_overrides,
         }
         result = _run_case_with_timeout(payload, args.timeout_seconds)
 

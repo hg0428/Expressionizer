@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 
 from .evaluator import EvaluatorOptions, WordingOptions, compact_evaluator_options, evaluate
+from .localization import ExplanationProfile, load_message_overrides
 from .equation_generation import generate_random_equation_problem
 from .procedural import FUNCTIONS, ExpressionContext, generate_random_expression
 from .render import render_latex
@@ -107,15 +108,23 @@ def _render_solution(values: dict[str, Any]) -> str:
 
 def _build_eval_options(payload: dict[str, Any]) -> EvaluatorOptions:
     wording_style = payload.get("wording_style", "verbose")
-    step_heading_template = payload.get("step_heading_template", "## Step {number}")
+    step_heading_template = payload.get("step_heading_template", "## {number}")
+    explanation_profile = ExplanationProfile(
+        locale=payload.get("locale", "en"),
+        message_overrides=payload.get("message_overrides", {}),
+        exact_text_overrides=payload.get("exact_text_overrides", {}),
+    )
     if payload.get("compact_explanations", False):
-        return compact_evaluator_options(
+        options = compact_evaluator_options(
             wording_style=wording_style,
             step_heading_template=step_heading_template,
         )
+        options.explanation_profile = explanation_profile
+        return options
     return EvaluatorOptions(
         wording_style=wording_style,
         wording_options=WordingOptions(step_heading_template=step_heading_template),
+        explanation_profile=explanation_profile,
     )
 
 
@@ -132,7 +141,12 @@ def _worker(payload: dict[str, Any], output_queue: Any):
     try:
         eval_options = _build_eval_options(payload)
         equation_wording = EquationWordingOptions(
-            step_heading_template=payload.get("step_heading_template", "## Step {number}")
+            step_heading_template=payload.get("step_heading_template", "## {number}"),
+            explanation_profile=ExplanationProfile(
+                locale=payload.get("locale", "en"),
+                message_overrides=payload.get("message_overrides", {}),
+                exact_text_overrides=payload.get("exact_text_overrides", {}),
+            ),
         )
         mode = payload.get("equation_mode", "expressions")
         if mode in ("equations", "mixed") and (
@@ -195,6 +209,9 @@ def _worker(payload: dict[str, Any], output_queue: Any):
                 difficulty=payload["difficulty"],
                 guarantee_solvable=payload["guarantee_solvable"],
                 generation_profile=payload.get("generation_profile", "realistic"),
+                solvability_mode=payload.get("solvability_mode", "mixed"),
+                unsolvable_probability=payload.get("unsolvable_probability", 0.12),
+                hard_problem_probability=payload.get("hard_problem_probability", 0.2),
                 context=context,
             )
             substitutions = context.substitutions.copy()
@@ -352,9 +369,19 @@ def _print_failure_and_repro(result: dict[str, Any], args: argparse.Namespace):
         + f"--difficulty-cycle {','.join(args.difficulty_cycle)} "
         + f"--equation-mode {args.equation_mode} "
         + f"--generation-profile {args.generation_profile} "
+        + f"--solvability-mode {args.solvability_mode} "
+        + f"--unsolvable-probability {args.unsolvable_probability} "
+        + f"--hard-problem-probability {args.hard_problem_probability} "
         + f"--wording-style {args.wording_style} "
         + ("--compact-explanations " if args.compact_explanations else "")
-        + f"--step-heading-template {json.dumps(args.step_heading_template)}"
+        + f"--step-heading-template {json.dumps(args.step_heading_template)} "
+        + f"--locale {args.locale} "
+        + (f"--messages-file {json.dumps(args.messages_file)} " if args.messages_file else "")
+        + (
+            f"--exact-text-overrides-file {json.dumps(args.exact_text_overrides_file)}"
+            if args.exact_text_overrides_file
+            else ""
+        )
     )
 
 
@@ -453,6 +480,24 @@ def main():
         help="Expression generation profile: realistic (shorter/user-facing) or stress (broader/extreme).",
     )
     parser.add_argument(
+        "--solvability-mode",
+        choices=["mixed", "solvable", "unsolvable"],
+        default="mixed",
+        help="Control how often generated expression problems are intentionally unsolvable.",
+    )
+    parser.add_argument(
+        "--unsolvable-probability",
+        type=float,
+        default=0.12,
+        help="When solvability-mode=mixed, probability of injecting intentionally unsolvable expression cases.",
+    )
+    parser.add_argument(
+        "--hard-problem-probability",
+        type=float,
+        default=0.2,
+        help="Probability of promoting a realistic case to a harder variant.",
+    )
+    parser.add_argument(
         "--wording-style",
         choices=["verbose", "concise"],
         default="verbose",
@@ -467,10 +512,31 @@ def main():
     parser.add_argument(
         "--step-heading-template",
         type=str,
-        default="## Step {number}",
+        default="## {number}",
         help="Template for section headings, e.g. '### Phase {number}'.",
     )
+    parser.add_argument("--locale", type=str, default="en")
+    parser.add_argument(
+        "--messages-file",
+        type=str,
+        default=None,
+        help="Optional JSON map for key-based template overrides.",
+    )
+    parser.add_argument(
+        "--exact-text-overrides-file",
+        type=str,
+        default=None,
+        help="Optional JSON map for exact text replacement overrides.",
+    )
     args = parser.parse_args()
+    message_overrides = (
+        load_message_overrides(args.messages_file) if args.messages_file else {}
+    )
+    exact_text_overrides = (
+        load_message_overrides(args.exact_text_overrides_file)
+        if args.exact_text_overrides_file
+        else {}
+    )
 
     profiles = _build_profiles(args.guarantee_solvable_mode, args.difficulty_cycle)
     if len(profiles) == 0:
@@ -501,9 +567,15 @@ def main():
             "sympy_strict": args.sympy_strict,
             "equation_mode": args.equation_mode,
             "generation_profile": args.generation_profile,
+            "solvability_mode": args.solvability_mode,
+            "unsolvable_probability": args.unsolvable_probability,
+            "hard_problem_probability": args.hard_problem_probability,
             "wording_style": args.wording_style,
             "compact_explanations": args.compact_explanations,
             "step_heading_template": args.step_heading_template,
+            "locale": args.locale,
+            "message_overrides": message_overrides,
+            "exact_text_overrides": exact_text_overrides,
         }
 
         result = _run_case_with_timeout(payload, args.timeout_seconds)

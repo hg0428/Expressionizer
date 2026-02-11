@@ -173,7 +173,7 @@ def render(expression: Union[Numerical, Equation, InEquality, SystemOfEquations]
             if len(expression.subscript_arguments) == 0:
                 subscript = ""
             elif len(expression.subscript_arguments) == 1:
-                subscript = f"_{", ".join(map(repr, expression.subscript_arguments))}"
+                subscript = "_" + ", ".join(map(repr, expression.subscript_arguments))
             else:
                 subscript = (
                     f"_{{{', '.join(map(repr, expression.subscript_arguments))}}}"
@@ -182,8 +182,8 @@ def render(expression: Union[Numerical, Equation, InEquality, SystemOfEquations]
             if len(expression.superscript_arguments) == 0:
                 superscript = ""
             elif len(expression.superscript_arguments) == 1:
-                superscript = (
-                    f"^{", ".join(map(repr, expression.superscript_arguments))}"
+                superscript = "^" + ", ".join(
+                    map(repr, expression.superscript_arguments)
                 )
             else:
                 superscript = (
@@ -236,7 +236,10 @@ def render_latex(
                 return "\\pi"
             return to_trimmed_decimal_string(expression)
         case complex():
-            return f"({expression.real} + {expression.imag}i)"
+            real = to_trimmed_decimal_string(expression.real)
+            imag_abs = to_trimmed_decimal_string(abs(expression.imag))
+            sign = "+" if expression.imag >= 0 else "-"
+            return f"({real} {sign} {imag_abs}i)"
         case Power(base, exponent) if (
             isinstance(expression.exponent, int)
             or isinstance(expression.exponent, float)
@@ -363,14 +366,24 @@ def render_latex(
             if len(expression.subscript_arguments) == 0:
                 subscript = ""
             elif len(expression.subscript_arguments) == 1:
-                subscript = f"_{", ".join(map(lambda term: render_latex(term, renderOptions), expression.subscript_arguments))}"
+                subscript = "_" + ", ".join(
+                    map(
+                        lambda term: render_latex(term, renderOptions),
+                        expression.subscript_arguments,
+                    )
+                )
             else:
                 subscript = f"_{{{', '.join(map(lambda term: render_latex(term, renderOptions), expression.subscript_arguments))}}}"
 
             if len(expression.superscript_arguments) == 0:
                 superscript = ""
             elif len(expression.superscript_arguments) == 1:
-                superscript = f"^{", ".join(map(lambda term: render_latex(term, renderOptions), expression.superscript_arguments))}"
+                superscript = "^" + ", ".join(
+                    map(
+                        lambda term: render_latex(term, renderOptions),
+                        expression.superscript_arguments,
+                    )
+                )
             else:
                 superscript = f"^{{{', '.join(map(lambda term: render_latex(term, renderOptions), expression.superscript_arguments))}}}"
             arguments = ", ".join(
@@ -461,11 +474,40 @@ def render_type(expression: Numerical, indent=0):
         case Power():
             result = f"Power(\n{render_type(expression.base, indent + 1)},\n{render_type(expression.exponent, indent + 1)}\n{indent_str})"
         case Product():
-            result = f"Product([\n{",\n".join([render_type(factor, indent + 1) for factor in expression.factors])}\n{indent_str}])"
+            rendered_factors = ",\n".join(
+                [render_type(factor, indent + 1) for factor in expression.factors]
+            )
+            result = f"Product([\n{rendered_factors}\n{indent_str}])"
         case Sum():
-            result = f"Sum([\n{",\n".join([render_type(term, indent + 1) for term in expression.terms])}\n{indent_str}])"
+            rendered_terms = ",\n".join(
+                [render_type(term, indent + 1) for term in expression.terms]
+            )
+            result = f"Sum([\n{rendered_terms}\n{indent_str}])"
         case FunctionCall():
-            result = f"FunctionCall([\n{",\n".join([render_type(term, indent + 1) for term in expression.functional_arguments])}\n],\n[\n{",\n".join([render_type(term, indent + 1) for term in expression.subscript_arguments])}\n],\n[\n{",\n".join([render_type(term, indent + 1) for term in expression.superscript_arguments])}\n{indent_str}])"
+            rendered_functional = ",\n".join(
+                [
+                    render_type(term, indent + 1)
+                    for term in expression.functional_arguments
+                ]
+            )
+            rendered_subscript = ",\n".join(
+                [render_type(term, indent + 1) for term in expression.subscript_arguments]
+            )
+            rendered_superscript = ",\n".join(
+                [
+                    render_type(term, indent + 1)
+                    for term in expression.superscript_arguments
+                ]
+            )
+            result = (
+                "FunctionCall([\n"
+                + rendered_functional
+                + "\n],\n[\n"
+                + rendered_subscript
+                + "\n],\n[\n"
+                + rendered_superscript
+                + f"\n{indent_str}])"
+            )
         case Derivative():
             parts = ", ".join([f"({render_type(v)}, {o})" for v, o in expression.variables])
             result = (

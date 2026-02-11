@@ -437,6 +437,9 @@ def generate_random_expression(
     difficulty: str = "intermediate",
     guarantee_solvable: bool = False,
     generation_profile: Literal["realistic", "stress"] = "realistic",
+    solvability_mode: Literal["mixed", "solvable", "unsolvable"] = "mixed",
+    unsolvable_probability: float = 0.12,
+    hard_problem_probability: float = 0.2,
     context: ExpressionContext = ExpressionContext(),
 ):
     """
@@ -552,12 +555,38 @@ def generate_random_expression(
     generation_profile = (generation_profile or "realistic").lower()
     if generation_profile not in ("realistic", "stress"):
         generation_profile = "realistic"
+    solvability_mode = (solvability_mode or "mixed").lower()
+    if solvability_mode not in ("mixed", "solvable", "unsolvable"):
+        solvability_mode = "mixed"
+    unsolvable_probability = max(0.0, min(1.0, float(unsolvable_probability)))
+    hard_problem_probability = max(0.0, min(1.0, float(hard_problem_probability)))
+    if guarantee_solvable:
+        solvability_mode = "solvable"
+
+    effective_unsolvable_probability = (
+        1.0
+        if solvability_mode == "unsolvable"
+        else (0.0 if solvability_mode == "solvable" else unsolvable_probability)
+    )
     if difficulty == "beginner":
         max_depth = min(max_depth, 3)
     elif difficulty == "intermediate" and generation_profile == "realistic":
         max_depth = min(max_depth, 4)
     elif difficulty == "advanced":
         max_depth = max(max_depth, 6) if generation_profile == "stress" else min(max_depth, 5)
+
+    if (
+        generation_profile == "realistic"
+        and _depth == 0
+        and random.random() < hard_problem_probability
+    ):
+        # Keep realism but occasionally elevate challenge.
+        if difficulty == "beginner":
+            max_depth = min(4, max_depth + 1)
+        elif difficulty == "intermediate":
+            max_depth = min(5, max_depth + 1)
+        else:
+            max_depth = min(6, max_depth + 1)
 
     # Base case for recursion
     p = 0.3 + 0.7 * (_depth / max_depth)
@@ -598,8 +627,71 @@ def generate_random_expression(
         "difficulty": difficulty,
         "guarantee_solvable": guarantee_solvable,
         "generation_profile": generation_profile,
+        "solvability_mode": solvability_mode,
+        "unsolvable_probability": unsolvable_probability,
+        "hard_problem_probability": hard_problem_probability,
         "context": context,
     }
+
+    def _generate_unsolvable_atom():
+        mode = random.choice(
+            [
+                "sqrt_negative",
+                "log_nonpositive",
+                "inverse_trig_outside_domain",
+                "factorial_negative",
+                "division_by_zero",
+            ]
+        )
+        if mode == "sqrt_negative":
+            return FunctionCall(
+                MathFunction("sqrt", functional_parameters=1),
+                [generate_number(mean=6, std=2, exponent=1.2, allow_negative=False, allow_zero=False, require_integer=True) * -1],
+            )
+        if mode == "log_nonpositive":
+            return FunctionCall(
+                MathFunction("log", functional_parameters=1),
+                [0 if random.random() < 0.5 else -generate_number(mean=4, std=2, exponent=1.2, allow_negative=False, allow_zero=False, require_integer=True)],
+            )
+        if mode == "inverse_trig_outside_domain":
+            value = generate_number(
+                mean=2.5,
+                std=1.0,
+                exponent=1.1,
+                allow_negative=False,
+                allow_zero=False,
+                require_integer=False,
+            )
+            if value <= 1:
+                value = value + 1.5
+            inverse_fn = random.choice(["asin", "acos"])
+            return FunctionCall(MathFunction(inverse_fn, functional_parameters=1), [value])
+        if mode == "factorial_negative":
+            return FunctionCall(
+                MathFunction("factorial", functional_parameters=1),
+                [-generate_number(mean=4, std=2, exponent=1.2, allow_negative=False, allow_zero=False, require_integer=True)],
+            )
+        # division_by_zero
+        non_zero_numerator = generate_number(
+            mean=4,
+            std=2,
+            exponent=1.2,
+            allow_negative=True,
+            allow_zero=False,
+            require_integer=True,
+        )
+        return product([non_zero_numerator, power(0, -1)])
+
+    if _depth == 0 and random.random() < effective_unsolvable_probability:
+        if random.random() < 0.55:
+            return _generate_unsolvable_atom()
+        safe_args = recursive_args.copy()
+        safe_args["solvability_mode"] = "solvable"
+        safe_args["unsolvable_probability"] = 0.0
+        safe_args["_depth"] = _depth + 1
+        benign = generate_random_expression(**safe_args)
+        uns = _generate_unsolvable_atom()
+        return Sum([benign, uns]) if random.random() < 0.5 else Product([benign, uns])
 
     # Decide the type of expression to generate
     choices = ["sum", "product", "power", "function"]

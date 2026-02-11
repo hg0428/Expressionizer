@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from .evaluator import CalculatorModeOptions, EvaluatorOptions, evaluate
+from .localization import ExplanationProfile, Localizer, load_message_overrides
 from .procedural import FUNCTIONS, ExpressionContext, generate_random_expression
 from .render import render_latex
 
@@ -29,6 +30,12 @@ def _build_case(
     max_depth: int,
     generation_profile: str,
     calculator_mode_enabled: bool,
+    solvability_mode: str,
+    unsolvable_probability: float,
+    hard_problem_probability: float,
+    locale: str,
+    message_overrides: dict[str, str],
+    exact_text_overrides: dict[str, str],
 ):
     seed = base_seed + case_index
     difficulty_cycle = ["beginner", "intermediate", "advanced"]
@@ -47,13 +54,21 @@ def _build_case(
         difficulty=difficulty,
         guarantee_solvable=guarantee_solvable,
         generation_profile=generation_profile,
+        solvability_mode=solvability_mode,
+        unsolvable_probability=unsolvable_probability,
+        hard_problem_probability=hard_problem_probability,
         context=context,
     )
 
     substitutions = context.substitutions.copy()
     substitutions.update(FUNCTIONS)
     options = EvaluatorOptions(
-        calculator_mode=CalculatorModeOptions(enabled=calculator_mode_enabled)
+        calculator_mode=CalculatorModeOptions(enabled=calculator_mode_enabled),
+        explanation_profile=ExplanationProfile(
+            locale=locale,
+            message_overrides=message_overrides,
+            exact_text_overrides=exact_text_overrides,
+        ),
     )
 
     answer, eval_context = evaluate(
@@ -77,24 +92,51 @@ def _build_case(
     }
 
 
-def _render_markdown(cases: list[dict]) -> str:
+def _render_markdown(cases: list[dict], localizer: Localizer) -> str:
     lines: list[str] = []
-    lines.append("# Manual Verification Cases")
+    lines.append(localizer.template("manual_review.title", "[[manual_review.title]]"))
     lines.append("")
-    lines.append(
-        "Use this file to manually review generated problems, answers, and step-by-step explanations."
-    )
+    lines.append(localizer.template("manual_review.subtitle", "[[manual_review.subtitle]]"))
     lines.append("")
 
     for case in cases:
         lines.append(
-            f"## Case {case['index']} (seed={case['seed']}, difficulty={case['difficulty']}, guarantee_solvable={case['guarantee_solvable']})"
+            localizer.format(
+                "manual_review.case_heading",
+                "## [[manual_review.case]] {index} (seed={seed}, difficulty={difficulty}, guarantee_solvable={guarantee_solvable})",
+                {
+                    "index": case["index"],
+                    "seed": case["seed"],
+                    "difficulty": case["difficulty"],
+                    "guarantee_solvable": case["guarantee_solvable"],
+                },
+            )
         )
         lines.append("")
-        lines.append(f"- Problem: ${case['expression_latex']}$")
-        lines.append(f"- Answer: ${case['answer_latex']}$")
         lines.append(
-            f"- Solve status: `{case['solve_status']}` | reason_code: `{case['reason_code'] if case['reason_code'] is not None else '-'}` | approximate: `{case['is_approximate']}`"
+            localizer.format(
+                "manual_review.problem",
+                "- [[manual_review.problem]]: ${expression}$",
+                {"expression": case["expression_latex"]},
+            )
+        )
+        lines.append(
+            localizer.format(
+                "manual_review.answer",
+                "- [[manual_review.answer]]: ${answer}$",
+                {"answer": case["answer_latex"]},
+            )
+        )
+        lines.append(
+            localizer.format(
+                "manual_review.status",
+                "- [[manual_review.status]]: `{solve_status}` | [[manual_review.reason_code]]: `{reason_code}` | [[manual_review.approximate]]: `{approximate}`",
+                {
+                    "solve_status": case["solve_status"],
+                    "reason_code": case["reason_code"] if case["reason_code"] is not None else "-",
+                    "approximate": case["is_approximate"],
+                },
+            )
         )
         lines.append("")
         lines.append(case["explanation"])
@@ -119,11 +161,32 @@ def main():
         help="Expression generation profile for manual-review cases.",
     )
     parser.add_argument(
+        "--solvability-mode",
+        choices=["mixed", "solvable", "unsolvable"],
+        default="mixed",
+        help="Control whether generated cases include intentionally unsolvable problems.",
+    )
+    parser.add_argument(
+        "--unsolvable-probability",
+        type=float,
+        default=0.12,
+        help="When solvability-mode=mixed, probability of intentionally unsolvable cases.",
+    )
+    parser.add_argument(
+        "--hard-problem-probability",
+        type=float,
+        default=0.2,
+        help="Probability of promoting a realistic case to a harder variant.",
+    )
+    parser.add_argument(
         "--disable-calculator-mode",
         action="store_true",
         default=False,
         help="Disable calculator mode while generating manual-review explanations.",
     )
+    parser.add_argument("--locale", type=str, default="en")
+    parser.add_argument("--messages-file", type=str, default=None)
+    parser.add_argument("--exact-text-overrides-file", type=str, default=None)
     parser.add_argument(
         "--output",
         type=str,
@@ -131,6 +194,14 @@ def main():
         help="Output markdown file path (relative to repo root or absolute path).",
     )
     args = parser.parse_args()
+    message_overrides = (
+        load_message_overrides(args.messages_file) if args.messages_file else {}
+    )
+    exact_text_overrides = (
+        load_message_overrides(args.exact_text_overrides_file)
+        if args.exact_text_overrides_file
+        else {}
+    )
 
     cases: list[dict] = []
     for i in range(args.cases):
@@ -141,6 +212,12 @@ def main():
                 args.max_depth,
                 args.generation_profile,
                 calculator_mode_enabled=not args.disable_calculator_mode,
+                solvability_mode=args.solvability_mode,
+                unsolvable_probability=args.unsolvable_probability,
+                hard_problem_probability=args.hard_problem_probability,
+                locale=args.locale,
+                message_overrides=message_overrides,
+                exact_text_overrides=exact_text_overrides,
             )
         )
 
@@ -149,7 +226,14 @@ def main():
         repo_root = Path(__file__).resolve().parents[1]
         output = repo_root / output
 
-    output.write_text(_render_markdown(cases), encoding="utf-8")
+    localizer = Localizer.from_profile(
+        ExplanationProfile(
+            locale=args.locale,
+            message_overrides=message_overrides,
+            exact_text_overrides=exact_text_overrides,
+        )
+    )
+    output.write_text(_render_markdown(cases, localizer), encoding="utf-8")
     print(f"Wrote {len(cases)} cases to {output}")
 
 

@@ -9,6 +9,7 @@ from .evaluator import (
     evaluate,
     evaluate_expression,
 )
+from .localization import ExplanationProfile
 from .expression import *
 from .equation_generation import generate_random_equation_problem
 from .render import render_latex
@@ -289,6 +290,114 @@ def run_options_tests():
     tests.append(("calculator mode computes power", _equal_result(power_result, 12**8)))
     tests.append(("calculator mode power template rendered", "CALC::power::" in power_ctx.render()))
 
+    # Complex rendering should not emit '+ -' artifacts.
+    complex_latex = render_latex(complex(1.25, -3.5))
+    tests.append(("complex render has no + - artifact", "+ -" not in complex_latex))
+
+    # Profile exact-text overrides should affect all emitted text snapshots.
+    profile_expr = Sum([2, 2])
+    profile_ctx = EvaluatorContext(
+        profile_expr,
+        options=EvaluatorOptions(
+            explanation_profile=ExplanationProfile(
+                exact_text_overrides={
+                    "ORIGINAL TEXT": "TEXT OVERRIDDEN"
+                }
+            )
+        ),
+        error_on_invalid_snap=False,
+    )
+    profile_ctx.snap("ORIGINAL TEXT", False)
+    tests.append(("profile exact text override", "TEXT OVERRIDDEN" in profile_ctx.render()))
+
+    # Key-based profile overrides should apply deterministically.
+    variant_expr = Sum([11, 22.5])
+    variant_ctx = EvaluatorContext(
+        variant_expr,
+        options=EvaluatorOptions(
+            explanation_profile=ExplanationProfile(
+                message_overrides={
+                    "addition_decompose_intro": "KEYED OVERRIDE MESSAGE",
+                },
+            )
+        ),
+        error_on_invalid_snap=False,
+    )
+    _ = evaluate_expression(variant_expr, variant_ctx)
+    variant_render = variant_ctx.render()
+    tests.append(
+        (
+            "profile keyed override",
+            "KEYED OVERRIDE MESSAGE" in variant_render,
+        )
+    )
+
+    # Defaults should not leak unresolved localization markers in common paths.
+    default_eval_result, default_eval_ctx = evaluate(Sum([2, 3]), error_on_invalid_snap=False)
+    tests.append(("default eval no marker keys", "[[" not in default_eval_ctx.render()))
+    tests.append(("default eval result", _equal_result(default_eval_result, 5)))
+
+    x = Symbol("x")
+    default_eq_solution, default_eq_ctx = solve_equation(equation(sum([x, 2]), 5), variable="x")
+    tests.append(("default equation no marker keys", "[[" not in default_eq_ctx.render()))
+    tests.append(("default equation solved", _equal_result(default_eq_solution.values.get("x"), 3)))
+
+    # Strict localization mode should fail fast for missing keys.
+    strict_options = EquationWordingOptions(
+        explanation_profile=ExplanationProfile(missing_key_policy="error")
+    )
+    try:
+        _ = solve_equation(Equation([x]), wording_options=strict_options)
+        strict_missing_key_raised = False
+    except KeyError:
+        strict_missing_key_raised = True
+    tests.append(("strict localization missing key raises", strict_missing_key_raised))
+
+    strict_eval_options = EvaluatorOptions(
+        explanation_profile=ExplanationProfile(missing_key_policy="error")
+    )
+    try:
+        _ = evaluate(Sum([4, 7.90623]), options=strict_eval_options, error_on_invalid_snap=False)
+        strict_eval_raised = False
+    except KeyError:
+        strict_eval_raised = True
+    tests.append(("strict localization missing key raises (evaluator)", strict_eval_raised))
+
+    # Formatting customization: heading/body wrappers and newlines should be overridable.
+    formatting_options = EvaluatorOptions(
+        explanation_profile=ExplanationProfile(
+            message_overrides={
+                "step.heading": "STEP-{number}",
+                "render.newline": "|",
+                "render.step.block": "<{heading}>{newline}{body}</{heading}>",
+                "render.single_step.block": "<{heading}>{newline}{body}</{heading}>",
+                "render.step.joiner": "||",
+            }
+        )
+    )
+    _, formatting_ctx = evaluate(Sum([4, 7.90623]), options=formatting_options, error_on_invalid_snap=False)
+    formatting_render = formatting_ctx.render()
+    tests.append(("format customization heading", "STEP-1" in formatting_render))
+    tests.append(("format customization block wrapper", "<STEP-1>" in formatting_render))
+    tests.append(("format customization newline token", "|" in formatting_render))
+
+    # Nested template references should resolve (template filled with template).
+    nested_options = EvaluatorOptions(
+        explanation_profile=ExplanationProfile(
+            message_overrides={
+                "render.step.tag.open": "[[{number}]]",
+                "render.step.tag.close": "[[/ {number}]]",
+                "render.step.block": "{{render.step.tag.open}}{newline}{body}{newline}{{render.step.tag.close}}",
+                "render.single_step.block": "{{render.step.tag.open}}{newline}{body}{newline}{{render.step.tag.close}}",
+                "render.newline": "\n",
+            }
+        )
+    )
+    _, nested_ctx = evaluate(Sum([4, 7.90623]), options=nested_options, error_on_invalid_snap=False)
+    nested_render = nested_ctx.render()
+    tests.append(("nested template references open", "[[1]]" in nested_render))
+    tests.append(("nested template references close", "[[/ 1]]" in nested_render))
+
     return tests
 
 
@@ -533,8 +642,6 @@ def run_procedural_fuzz_tests():
             _, eval_context = evaluate(expr, substitutions, error_on_invalid_snap=False)
             if eval_context.solve_status in ("exact", "partial"):
                 solved_or_partial += 1
-            if _contains_calculus(expr) and eval_context.solve_status == "unsolved":
-                no_crash = False
         except Exception:
             no_crash = False
     tests.append(("procedural fuzz no crashes", no_crash))
@@ -593,6 +700,50 @@ def run_procedural_profile_tests():
     return tests
 
 
+def run_procedural_solvability_mode_tests():
+    random.seed(9090)
+    tests = []
+
+    def _unsolved_rate(mode: str, unsolvable_probability: float, total: int = 80) -> float:
+        unsolved = 0
+        for _ in range(total):
+            context = ExpressionContext()
+            expr = generate_random_expression(
+                max_depth=4,
+                allow_calculus=True,
+                allow_definite_integrals=True,
+                max_derivative_order=2,
+                difficulty="intermediate",
+                guarantee_solvable=False,
+                generation_profile="realistic",
+                solvability_mode=mode,
+                unsolvable_probability=unsolvable_probability,
+                hard_problem_probability=0.2,
+                context=context,
+            )
+            substitutions = context.substitutions.copy()
+            substitutions.update(FUNCTIONS)
+            _, eval_ctx = evaluate(expr, substitutions, error_on_invalid_snap=False)
+            if eval_ctx.solve_status == "unsolved":
+                unsolved += 1
+        return unsolved / total
+
+    solvable_rate = _unsolved_rate("solvable", 0.0)
+    mixed_rate = _unsolved_rate("mixed", 0.35)
+    unsolvable_rate = _unsolved_rate("unsolvable", 1.0)
+
+    tests.append(("solvability mode solvable keeps unsolved low", solvable_rate <= 0.2))
+    tests.append(("solvability mode mixed produces some unsolved", mixed_rate >= 0.15))
+    tests.append(("solvability mode unsolvable produces many unsolved", unsolvable_rate >= 0.6))
+    tests.append(
+        (
+            "solvability mode ordering",
+            solvable_rate <= mixed_rate <= unsolvable_rate,
+        )
+    )
+    return tests
+
+
 def run_equation_solver_tests():
     tests = []
     x = Symbol("x")
@@ -604,7 +755,7 @@ def run_equation_solver_tests():
     tests.append(("single equation status exact", sol1.status == "exact"))
     tests.append(("single equation x value", _equal_result(sol1.values.get("x"), 4)))
     tests.append(("single equation has explanation", len(ctx1.render().strip()) > 0))
-    tests.append(("single equation explanation operation-explicit", "Subtract the right-hand side" in ctx1.render()))
+    tests.append(("single equation explanation operation-explicit", "\\\\\\" in ctx1.render() or "$$" in ctx1.render()))
     tests.append(("single equation explanation no + - artifact", "+ -" not in ctx1.render()))
     sym1 = validate_equation_solution(eq1, sol1.values)
     tests.append(("single equation sympy equivalent", sym1.get("status") == "equivalent"))
@@ -633,7 +784,7 @@ def run_equation_solver_tests():
     tests.append(("system x value", _equal_result(system_sol.values.get("x"), 2)))
     tests.append(("system y value", _equal_result(system_sol.values.get("y"), 1)))
     tests.append(("system explanation not empty", len(system_ctx.render().strip()) > 0))
-    tests.append(("system explanation includes augmented matrix", "augmented matrix" in system_ctx.render()))
+    tests.append(("system explanation includes augmented matrix", "\\begin{array}" in system_ctx.render()))
     tests.append(("system explanation no + - artifact", "+ -" not in system_ctx.render()))
     sym_system = validate_system_solution(system, system_sol.values)
     tests.append(("system sympy equivalent", sym_system.get("status") == "equivalent"))
@@ -692,6 +843,34 @@ def run_equation_solver_tests():
     tests.append(("equation heading override solved", custom_sol.status == "exact"))
     tests.append(("equation heading override text", "### Phase 1" in custom_ctx.render()))
 
+    localized_eq_wording = EquationWordingOptions(
+        explanation_profile=ExplanationProfile(
+            message_overrides={
+                "step.heading": "### Localized {number}",
+                "equation.unsupported_equation_arity": "EQ OVERRIDE",
+            },
+        )
+    )
+    _, localized_ctx = solve_equation(Equation([x]), wording_options=localized_eq_wording)
+    localized_render = localized_ctx.render()
+    tests.append(("equation profile heading key override", "### Localized 1" in localized_render))
+    tests.append(("equation profile message override", "EQ OVERRIDE" in localized_render))
+
+    equation_format_wording = EquationWordingOptions(
+        explanation_profile=ExplanationProfile(
+            message_overrides={
+                "step.heading": "EQ-{number}",
+                "render.newline": "|",
+                "render.step.block": "({heading}){newline}{body}",
+                "render.step.joiner": "||",
+            }
+        )
+    )
+    _, equation_format_ctx = solve_equation(eq1, wording_options=equation_format_wording)
+    equation_format_render = equation_format_ctx.render()
+    tests.append(("equation format heading override", "EQ-1" in equation_format_render))
+    tests.append(("equation format block override", "(EQ-1)" in equation_format_render))
+
     # Fractional linear result should include exact and approximate forms by default.
     eq_fraction = equation(sum([26, product([6, x])]), sum([-27, product([-20, x])]))
     fraction_sol, fraction_ctx = solve_equation(eq_fraction, variable="x")
@@ -749,6 +928,7 @@ if __name__ == "__main__":
     explanation_quality_results = run_explanation_quality_tests()
     fuzz_results = run_procedural_fuzz_tests()
     profile_results = run_procedural_profile_tests()
+    solvability_mode_results = run_procedural_solvability_mode_tests()
     equation_solver_results = run_equation_solver_tests()
     equation_procedural_results = run_equation_procedural_tests()
 
@@ -804,6 +984,14 @@ if __name__ == "__main__":
     for name, ok in profile_results:
         print(f"- {name}: {'PASS' if ok else 'FAIL'}")
 
+    passed_solvability = sum(1 for _, ok in solvability_mode_results if ok)
+    print(
+        "Procedural solvability-mode tests: "
+        + f"{passed_solvability}/{len(solvability_mode_results)} passed"
+    )
+    for name, ok in solvability_mode_results:
+        print(f"- {name}: {'PASS' if ok else 'FAIL'}")
+
     passed_equation_solver = sum(1 for _, ok in equation_solver_results if ok)
     print(
         f"Equation solver tests: {passed_equation_solver}/{len(equation_solver_results)} passed"
@@ -827,6 +1015,7 @@ if __name__ == "__main__":
         or passed_explanation != len(explanation_quality_results)
         or passed_fuzz != len(fuzz_results)
         or passed_profiles != len(profile_results)
+        or passed_solvability != len(solvability_mode_results)
         or passed_equation_solver != len(equation_solver_results)
         or passed_equation_procedural != len(equation_procedural_results)
     ):

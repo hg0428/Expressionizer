@@ -6,6 +6,10 @@ Use this checklist before tagging/publishing a stable release.
 
 - Run full suite:
   - `python -m expressionizer.test`
+- Compatibility smoke (if interpreters are available):
+  - `python3.10 -m expressionizer.test`
+  - `python3.11 -m expressionizer.test`
+  - `python3.12 -m expressionizer.test`
 - Run smoke script:
   - `python release_smoke.py`
 - Run longer procedural soak (realistic profile):

@@ -24,6 +24,7 @@ from .expression import (
     derivative,
 )
 from .number_format import to_trimmed_decimal_string
+from .localization import ExplanationProfile, Localizer
 from .render import render_latex, render_type
 
 
@@ -70,7 +71,7 @@ def round_sig(x, sig=2):
 class WordingOptions:
     templates: dict[str, str] = field(default_factory=dict)
     concise_templates: dict[str, str] = field(default_factory=dict)
-    step_heading_template: str = "## Step {number}"
+    step_heading_template: str = "## {number}"
 
 
 @dataclass
@@ -82,10 +83,8 @@ class CalculatorModeOptions:
     power_base_complexity_threshold: int = 5
     power_exponent_complexity_threshold: int = 3
     result_complexity_threshold: int = 28
-    template: str = (
-        "Use a calculator for this {operation}: $$ {expression} = {result} $$"
-    )
-    concise_template: str = "Calculator ({operation}): $$ {expression} = {result} $$"
+    template: str = "$$ {expression} = {result} $$"
+    concise_template: str = "$$ {expression} = {result} $$"
     operation_templates: dict[str, str] = field(default_factory=dict)
     concise_operation_templates: dict[str, str] = field(default_factory=dict)
 
@@ -118,7 +117,6 @@ def wording(
 ) -> str:
     style = context.options.wording_style
     concise = concise if concise is not None else verbose
-
     template = verbose if style == "verbose" else concise
     options = context.options.wording_options
     if options is not None:
@@ -130,11 +128,7 @@ def wording(
             )
         else:
             template = options.templates.get(key, template)
-
-    if kwargs:
-        for k, v in kwargs.items():
-            template = template.replace("{" + k + "}", str(v))
-    return template
+    return context.localizer.format(key, template, kwargs)
 
 
 @dataclass
@@ -165,15 +159,18 @@ class EvaluatorOptions:
     zero_power_zero_policy: Literal["undefined", "one", "zero"] = "undefined"
     overflow_policy: Literal["symbolic", "infinity", "zero"] = "symbolic"
     calculator_mode: CalculatorModeOptions = field(default_factory=CalculatorModeOptions)
+    explanation_profile: Optional[ExplanationProfile] = None
 
 
 def compact_evaluator_options(
     wording_style: Literal["verbose", "concise"] = "concise",
-    step_heading_template: str = "## Step {number}",
+    step_heading_template: str = "## {number}",
+    explanation_profile: Optional[ExplanationProfile] = None,
 ) -> EvaluatorOptions:
     return EvaluatorOptions(
         wording_style=wording_style,
         wording_options=WordingOptions(step_heading_template=step_heading_template),
+        explanation_profile=explanation_profile,
         show_complexity_explanations=False,
         show_decimal_shift_explanations=False,
         show_multiplication_table=False,
@@ -265,9 +262,10 @@ def _format_calculator_message(
     try:
         return template.format(**payload)
     except Exception:
-        return (
-            f"Use a calculator for this {operation}: "
-            + f"$$ {payload['expression']} = {payload['result']} $$"
+        return context.localizer.format(
+            "calculator.fallback",
+            "$$ {expression} = {result} $$",
+            payload,
         )
 
 
@@ -425,6 +423,7 @@ class EvaluatorContext:
     solve_status: Literal["exact", "partial", "unsolved"]
     reason_code: Optional[str]
     coverage_tags: set[str]
+    localizer: Localizer
 
     def __init__(
         self,
@@ -439,6 +438,7 @@ class EvaluatorContext:
         self.current_tree = tree
         self.original_tree = tree
         self.options = options
+        self.localizer = Localizer.from_profile(options.explanation_profile)
         self.error_on_invalid_snap = error_on_invalid_snap
         self.error_count = 0
         self.is_approximate = False
@@ -500,7 +500,9 @@ class EvaluatorContext:
             self.is_approximate = True
         if isinstance(original, str):
             # print(original)
-            return self.snapshots.append(TextSnapshot(original, bool(simplified)))
+            return self.snapshots.append(
+                TextSnapshot(self.localizer.transform_text(original), bool(simplified))
+            )
         if contains(self.current_tree, original) <= 0:
             if self.error_on_invalid_snap:
                 raise ValueError(
@@ -548,6 +550,7 @@ class EvaluatorContext:
                 # Explanations often contain literal braces from LaTeX.
                 # If formatting fails, keep original text instead of crashing.
                 snapshot.explanation = explanation
+            snapshot.explanation = self.localizer.transform_text(snapshot.explanation)
             self.snapshots.append(snapshot)
         elif snapshot != previous or len(self.snapshots) == 0:
             self.snapshots.append(snapshot)
@@ -591,14 +594,20 @@ class EvaluatorContext:
 
     def render(self):
         def _step_heading(step_number: int) -> str:
-            template = "## Step {number}"
+            template = self.localizer.template("step.heading", "## {number}")
             options = self.options.wording_options
             if options is not None and getattr(options, "step_heading_template", None):
                 template = options.step_heading_template
             try:
                 return template.format(number=step_number)
             except Exception:
-                return f"## Step {step_number}"
+                return f"## {step_number}"
+
+        newline = self.localizer.template("render.newline", "\n")
+        substep_joiner = self.localizer.template("render.substep.joiner", newline)
+        step_joiner = self.localizer.template("render.step.joiner", newline + newline)
+        document_prefix = self.localizer.template("render.document.prefix", "")
+        document_suffix = self.localizer.template("render.document.suffix", "")
 
         steps = [[]]
         consecutive = []
@@ -713,13 +722,34 @@ class EvaluatorContext:
             if step:
                 filtered_steps.append(step)
         if len(filtered_steps) == 1:
-            return "\n".join(filtered_steps[0])
-        text = ""
+            body = substep_joiner.join(filtered_steps[0])
+            block = self.localizer.format(
+                "render.single_step.block",
+                "{body}",
+                {
+                    "heading": _step_heading(1),
+                    "body": body,
+                    "number": 1,
+                    "newline": newline,
+                },
+            )
+            return document_prefix + block + document_suffix
+        blocks: list[str] = []
         for i, step in enumerate(filtered_steps):
-            text += _step_heading(i + 1) + "\n"
-            for substep in step:
-                text += substep + "\n"
-        return text
+            body = substep_joiner.join(step)
+            blocks.append(
+                self.localizer.format(
+                    "render.step.block",
+                    "{heading}{newline}{body}",
+                    {
+                        "heading": _step_heading(i + 1),
+                        "body": body,
+                        "number": i + 1,
+                        "newline": newline,
+                    },
+                )
+            )
+        return document_prefix + step_joiner.join(blocks) + document_suffix
 
     def render_explanation_events(self):
         if len(self.explanation_events) == 0:
@@ -2396,7 +2426,14 @@ def evaluate_expression(expression: Numerical, context: EvaluatorContext):
                     ),
                 )
                 return result
-            if base == -1 and is_int_or_float(exponent) and exponent.is_integer():
+            if (
+                base == -1
+                and is_int_or_float(exponent)
+                and (
+                    isinstance(exponent, int)
+                    or (isinstance(exponent, float) and exponent.is_integer())
+                )
+            ):
                 # Determine sign
                 if exponent % 2 == 0:
                     result = 1
@@ -2989,20 +3026,27 @@ def evaluate(
         }
         keys = list(variable_substitutions.keys())
         substitutions = []
-        for i, (k, v) in enumerate(variable_substitutions.items()):
-            sub = f"${k} = {render_latex(v)}$"
-            if i == len(keys) - 2:
-                sub += " and "
-            elif i < len(keys) - 2:
-                sub += ", "
-            substitutions.append(sub)
+        for k, v in variable_substitutions.items():
+            substitutions.append(f"${k} = {render_latex(v)}$")
+        separator_pair = context.localizer.template(
+            "substitution.separator_pair", " [[substitution.separator_pair]] "
+        )
+        separator_many = context.localizer.template(
+            "substitution.separator_many", " [[substitution.separator_many]] "
+        )
+        if len(substitutions) <= 1:
+            substitutions_text = "".join(substitutions)
+        elif len(substitutions) == 2:
+            substitutions_text = separator_pair.join(substitutions)
+        else:
+            substitutions_text = separator_many.join(substitutions[:-1]) + separator_pair + substitutions[-1]
         context.snap(
             wording(
                 context,
                 "substitution_intro",
-                f"Substitute the given values: {''.join(substitutions)}.",
-                f"Substitute values: {''.join(substitutions)}.",
-                substitutions="".join(substitutions),
+                f"Substitute the given values: {substitutions_text}.",
+                f"Substitute values: {substitutions_text}.",
+                substitutions=substitutions_text,
             ),
             False,
         )

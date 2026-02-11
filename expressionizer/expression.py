@@ -317,14 +317,14 @@ class FunctionCall:
         if len(self.subscript_arguments) == 0:
             subscript = ""
         elif len(self.subscript_arguments) == 1:
-            subscript = f"_{", ".join(map(repr, self.subscript_arguments))}"
+            subscript = "_" + ", ".join(map(repr, self.subscript_arguments))
         else:
             subscript = f"_{{{', '.join(map(repr, self.subscript_arguments))}}}"
 
         if len(self.superscript_arguments) == 0:
             superscript = ""
         elif len(self.superscript_arguments) == 1:
-            superscript = f"^{", ".join(map(repr, self.superscript_arguments))}"
+            superscript = "^" + ", ".join(map(repr, self.superscript_arguments))
         else:
             superscript = f"^{{{', '.join(map(repr, self.superscript_arguments))}}}"
 

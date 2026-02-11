@@ -4,18 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "expressionizer"
-version = '0.8.0rc1'
+version = '0.8.0'
 description = "A Python library for symbolic math expressions and evaluation."
 authors = [{ name = "Hudson Gouge", email = "hudson.gouge@icloud.com" }]
 readme = "README.md"
 requires-python = ">=3.8"
-license = { text = "MIT" }
+license = "MIT"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
-dependencies = []
+dependencies = ["numpy"]
 
 [project.urls]
 Homepage = "https://pypi.org/project/expressionizer/"

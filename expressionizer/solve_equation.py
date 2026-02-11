@@ -21,6 +21,7 @@ from .expression import (
     sum as expr_sum,
 )
 from .render import render_latex
+from .localization import ExplanationProfile, Localizer
 
 
 @dataclass
@@ -28,9 +29,12 @@ class EquationSolveContext:
     solve_status: str = "exact"
     reason_code: Optional[str] = None
     steps: list[str] = field(default_factory=list)
-    step_heading_template: str = "## Step {number}"
+    step_heading_template: str = "## {number}"
+    localizer: Optional[Localizer] = None
 
     def add_step(self, text: str):
+        if self.localizer is not None:
+            text = self.localizer.transform_text(text)
         self.steps.append(text)
 
     def set_status(self, solve_status: str, reason_code: Optional[str] = None):
@@ -40,23 +44,58 @@ class EquationSolveContext:
     def render(self) -> str:
         if not self.steps:
             return ""
-        lines: list[str] = []
+        newline = (
+            self.localizer.template("render.newline", "\n")
+            if self.localizer is not None
+            else "\n"
+        )
+        step_joiner = (
+            self.localizer.template("render.step.joiner", newline + newline)
+            if self.localizer is not None
+            else newline + newline
+        )
+        document_prefix = (
+            self.localizer.template("render.document.prefix", "")
+            if self.localizer is not None
+            else ""
+        )
+        document_suffix = (
+            self.localizer.template("render.document.suffix", "")
+            if self.localizer is not None
+            else ""
+        )
+        blocks: list[str] = []
         for index, step in enumerate(self.steps, 1):
+            template = self.step_heading_template
+            if self.localizer is not None:
+                template = self.localizer.template("step.heading", template)
             try:
-                heading = self.step_heading_template.format(number=index)
+                heading = template.format(number=index)
             except Exception:
-                heading = f"## Step {index}"
-            lines.append(heading)
-            lines.append(step)
-            lines.append("")
-        return "\n".join(lines).rstrip()
+                heading = f"## {index}"
+            if self.localizer is not None:
+                block = self.localizer.format(
+                    "render.step.block",
+                    "{heading}{newline}{body}",
+                    {
+                        "heading": heading,
+                        "body": step,
+                        "number": index,
+                        "newline": newline,
+                    },
+                )
+            else:
+                block = f"{heading}{newline}{step}"
+            blocks.append(block)
+        return document_prefix + step_joiner.join(blocks) + document_suffix
 
 
 @dataclass
 class EquationWordingOptions:
-    step_heading_template: str = "## Step {number}"
+    step_heading_template: str = "## {number}"
     show_matrix_state: bool = True
     show_exact_and_approximate: bool = True
+    explanation_profile: Optional[ExplanationProfile] = None
 
 
 @dataclass
@@ -115,6 +154,12 @@ def _tidy_latex(text: str) -> str:
 
 def _latex(expr) -> str:
     return _tidy_latex(render_latex(expr))
+
+
+def _msg(context: EquationSolveContext, key: str, default: str | None = None, **payload) -> str:
+    if context.localizer is None:
+        return default if default is not None else f"[[{key}]]"
+    return context.localizer.format(key, default, payload)
 
 
 def _value_latex(value: object, show_exact_and_approximate: bool = True) -> str:
@@ -455,24 +500,45 @@ def _solve_quadratic_native(
         ),
         0,
     )
-    context.add_step(f"Rearrange into quadratic form: $$ {_latex(canonical)} $$")
+    context.add_step(
+        _msg(
+            context,
+            "equation.quadratic.rearrange",
+            "$$ {canonical} $$",
+            canonical=_latex(canonical),
+        )
+    )
 
     discriminant = b * b - 4 * a * c
     context.add_step(
-        "Compute the discriminant: "
-        + f"$$\\Delta = b^2 - 4ac = {_latex(_clean_number(discriminant))}$$"
+        _msg(
+            context,
+            "equation.quadratic.discriminant",
+            "$$\\Delta = b^2 - 4ac = {discriminant}$$",
+            discriminant=_latex(_clean_number(discriminant)),
+        )
     )
 
     if discriminant < -1e-12:
         context.set_status("unsolved", "no_real_solution")
-        context.add_step("The discriminant is negative, so there are no real solutions.")
+        context.add_step(
+            _msg(context, "equation.quadratic.no_real", "$$ \\Delta < 0 $$")
+        )
         return EquationSolution({}, context.solve_status, context.reason_code)
 
     if abs(discriminant) <= 1e-12:
         root = _clean_number((-b) / (2 * a))
         context.add_step(
-            "Use the quadratic formula with $\\Delta = 0$ to get one repeated root: "
-            + f"$$ {variable_name} = {_value_latex(root, (wording_options.show_exact_and_approximate if wording_options else True))} $$"
+            _msg(
+                context,
+                "equation.quadratic.repeated_root",
+                "$$ {variable} = {value} $$",
+                variable=variable_name,
+                value=_value_latex(
+                    root,
+                    (wording_options.show_exact_and_approximate if wording_options else True),
+                ),
+            )
         )
         return EquationSolution({variable_name: root}, context.solve_status, context.reason_code)
 
@@ -481,11 +547,26 @@ def _solve_quadratic_native(
     root_2 = _clean_number(((-b) - sqrt_discriminant) / (2 * a))
     roots = sorted([root_1, root_2], key=lambda value: float(value))
     context.add_step(
-        "Apply the quadratic formula: "
-        + f"$$ {variable_name} = \\frac{{-b \\pm \\sqrt{{\\Delta}}}}{{2a}} $$"
+        _msg(
+            context,
+            "equation.quadratic.formula",
+            "$$ {variable} = \\frac{{-b \\pm \\sqrt{{\\Delta}}}}{{2a}} $$",
+            variable=variable_name,
+        )
     )
     context.add_step(
-        f"Therefore, $$ {variable_name} \\in \\{{{_value_latex(roots[0], (wording_options.show_exact_and_approximate if wording_options else True))}, {_value_latex(roots[1], (wording_options.show_exact_and_approximate if wording_options else True))}\\}} $$"
+        _msg(
+            context,
+            "equation.quadratic.solution_set",
+            "$$ {variable} \\in \\{{{v1}, {v2}\\}} $$",
+            variable=variable_name,
+            v1=_value_latex(
+                roots[0], (wording_options.show_exact_and_approximate if wording_options else True)
+            ),
+            v2=_value_latex(
+                roots[1], (wording_options.show_exact_and_approximate if wording_options else True)
+            ),
+        )
     )
     return EquationSolution({variable_name: roots}, context.solve_status, context.reason_code)
 
@@ -504,7 +585,9 @@ def _solve_rational_native(
     combined = _laurent_add(lhs, _laurent_scale(rhs, -1.0))
     if not combined.coefficients:
         context.set_status("partial", "infinite_solutions")
-        context.add_step("The equation simplifies to an identity on the allowed domain.")
+        context.add_step(
+            _msg(context, "equation.rational.identity_domain", "$$ \\text{identity on domain} $$")
+        )
         return EquationSolution({}, context.solve_status, context.reason_code)
 
     min_degree = min(combined.coefficients)
@@ -514,10 +597,20 @@ def _solve_rational_native(
 
     x = Symbol(variable_name)
     context.add_step(
-        f"Domain restriction: ${variable_name} \\neq 0$ because it appears in a denominator."
+        _msg(
+            context,
+            "equation.rational.domain_restriction",
+            "$$ {variable} \\neq 0 $$",
+            variable=variable_name,
+        )
     )
     context.add_step(
-        f"Multiply both sides by ${variable_name}$ to clear the denominator."
+        _msg(
+            context,
+            "equation.rational.clear_denominator",
+            "$$ \\times {variable} $$",
+            variable=variable_name,
+        )
     )
 
     shifted: dict[int, float] = {}
@@ -538,11 +631,18 @@ def _solve_rational_native(
         ),
         0,
     )
-    context.add_step(f"After clearing denominators: $$ {_latex(canonical)} $$")
+    context.add_step(
+        _msg(
+            context,
+            "equation.rational.canonical_after_clear",
+            "$$ {canonical} $$",
+            canonical=_latex(canonical),
+        )
+    )
 
     if abs(a2) < 1e-12 and abs(a1) < 1e-12:
         context.set_status("unsolved", "no_solution")
-        context.add_step("The reduced equation is inconsistent, so there is no solution.")
+        context.add_step(_msg(context, "equation.rational.inconsistent", "$$ \\bot $$"))
         return EquationSolution({}, context.solve_status, context.reason_code)
 
     candidate_values: list[float] = []
@@ -550,17 +650,32 @@ def _solve_rational_native(
         root = (-a0) / a1
         candidate_values = [root]
         context.add_step(
-            f"Solve the linear equation: $$ {variable_name} = {_value_latex(_clean_number(root), (wording_options.show_exact_and_approximate if wording_options else True))} $$"
+            _msg(
+                context,
+                "equation.rational.linear_solution",
+                "$$ {variable} = {value} $$",
+                variable=variable_name,
+                value=_value_latex(
+                    _clean_number(root),
+                    (wording_options.show_exact_and_approximate if wording_options else True),
+                ),
+            )
         )
     else:
         discriminant = a1 * a1 - 4 * a2 * a0
         context.add_step(
-            "Compute the discriminant: "
-            + f"$$\\Delta = {render_latex(_clean_number(discriminant))}$$"
+            _msg(
+                context,
+                "equation.rational.discriminant",
+                "$$\\Delta = {discriminant}$$",
+                discriminant=render_latex(_clean_number(discriminant)),
+            )
         )
         if discriminant < -1e-12:
             context.set_status("unsolved", "no_real_solution")
-            context.add_step("The discriminant is negative, so there are no real solutions.")
+            context.add_step(
+                _msg(context, "equation.rational.no_real", "$$ \\Delta < 0 $$")
+            )
             return EquationSolution({}, context.solve_status, context.reason_code)
         if abs(discriminant) <= 1e-12:
             candidate_values = [(-a1) / (2 * a2)]
@@ -581,20 +696,43 @@ def _solve_rational_native(
     if not filtered:
         context.set_status("unsolved", "no_solution_domain_restriction")
         context.add_step(
-            f"All candidate roots violate the domain restriction ${variable_name} \\neq 0$."
+            _msg(
+                context,
+                "equation.rational.domain_rejection",
+                "$$ {variable} \\neq 0 $$",
+                variable=variable_name,
+            )
         )
         return EquationSolution({}, context.solve_status, context.reason_code)
 
     if len(filtered) == 1:
         context.add_step(
-            f"Valid solution after domain check: $$ {variable_name} = {_value_latex(filtered[0], (wording_options.show_exact_and_approximate if wording_options else True))} $$"
+            _msg(
+                context,
+                "equation.rational.valid_solution",
+                "$$ {variable} = {value} $$",
+                variable=variable_name,
+                value=_value_latex(
+                    filtered[0], (wording_options.show_exact_and_approximate if wording_options else True)
+                ),
+            )
         )
         return EquationSolution({variable_name: filtered[0]}, context.solve_status, context.reason_code)
 
     filtered.sort(key=lambda value: float(value))
     context.add_step(
-        "Valid solutions after domain check: "
-        + f"$$ {variable_name} \\in \\{{{_value_latex(filtered[0], (wording_options.show_exact_and_approximate if wording_options else True))}, {_value_latex(filtered[1], (wording_options.show_exact_and_approximate if wording_options else True))}\\}} $$"
+        _msg(
+            context,
+            "equation.rational.valid_solutions",
+            "$$ {variable} \\in \\{{{v1}, {v2}\\}} $$",
+            variable=variable_name,
+            v1=_value_latex(
+                filtered[0], (wording_options.show_exact_and_approximate if wording_options else True)
+            ),
+            v2=_value_latex(
+                filtered[1], (wording_options.show_exact_and_approximate if wording_options else True)
+            ),
+        )
     )
     return EquationSolution({variable_name: filtered}, context.solve_status, context.reason_code)
 
@@ -604,18 +742,26 @@ def solve_equation(
     variable: Optional[Symbol | str] = None,
     wording_options: Optional[EquationWordingOptions] = None,
 ) -> tuple[EquationSolution, EquationSolveContext]:
+    localizer = Localizer.from_profile(
+        wording_options.explanation_profile if wording_options is not None else None
+    )
     context = EquationSolveContext(
         step_heading_template=(
             wording_options.step_heading_template
             if wording_options is not None
-            else "## Step {number}"
-        )
+            else "## {number}"
+        ),
+        localizer=localizer,
     )
-    context.add_step(f"Solve the equation: $${_latex(eq)}$$")
+    context.add_step(
+        _msg(context, "equation.solve.start", "$$ {equation} $$", equation=_latex(eq))
+    )
 
     if len(eq.expressions) != 2:
         context.set_status("unsolved", "unsupported_equation_arity")
-        context.add_step("Only two-sided equations are supported in this solver.")
+        context.add_step(
+            _msg(context, "equation.unsupported_equation_arity", "$$ \\text{unsupported equation arity} $$")
+        )
         return EquationSolution({}, context.solve_status, context.reason_code), context
 
     lhs, rhs = eq.expressions
@@ -630,7 +776,11 @@ def solve_equation(
         if variable_name is None:
             context.set_status("partial", "multiple_variables")
             context.add_step(
-                "Nonlinear native solving requires a single target variable. Pass `variable=` explicitly."
+                _msg(
+                    context,
+                    "equation.nonlinear.target_variable_required",
+                    "$$ \\text{target variable required} $$",
+                )
             )
             return EquationSolution({}, context.solve_status, context.reason_code), context
         rational_solution = _solve_rational_native(
@@ -651,15 +801,19 @@ def solve_equation(
             return quadratic_solution, context
         context.set_status("partial", "nonlinear_unsupported_native_only")
         context.add_step(
-            "This nonlinear equation is outside native-supported patterns, so it is left unsolved."
+            _msg(context, "equation.nonlinear.unsupported_pattern", "$$ \\text{unsupported nonlinear pattern} $$")
         )
         return EquationSolution({}, context.solve_status, context.reason_code), context
 
     combined = _add_forms(lhs_form, _scale_form(rhs_form, -1.0))
     canonical_equation = equation(_form_to_expression(combined), 0)
     context.add_step(
-        "Subtract the right-hand side from both sides to write the equation in standard form: "
-        + f"$$ {_latex(canonical_equation)} $$"
+        _msg(
+            context,
+            "equation.linear.standard_form",
+            "$$ {canonical} $$",
+            canonical=_latex(canonical_equation),
+        )
     )
 
     variable_name = variable.name if isinstance(variable, Symbol) else variable
@@ -670,10 +824,10 @@ def solve_equation(
     if len(nonzero_variables) == 0:
         if abs(combined.constant) < 1e-12:
             context.set_status("partial", "infinite_solutions")
-            context.add_step("The equation simplifies to $0 = 0$, so infinitely many solutions exist.")
+            context.add_step(_msg(context, "equation.linear.identity", "$$ 0 = 0 $$"))
         else:
             context.set_status("unsolved", "no_solution")
-            context.add_step("The equation simplifies to a contradiction, so there is no solution.")
+            context.add_step(_msg(context, "equation.linear.contradiction", "$$ \\bot $$"))
         return EquationSolution({}, context.solve_status, context.reason_code), context
 
     if variable_name is None:
@@ -682,20 +836,32 @@ def solve_equation(
         else:
             context.set_status("partial", "multiple_variables")
             context.add_step(
-                "Multiple variables remain. Pass `variable=` to solve for a specific one."
+                _msg(context, "equation.linear.multiple_variables", "$$ \\text{multiple variables remain} $$")
             )
             return EquationSolution({}, context.solve_status, context.reason_code), context
 
     if variable_name not in combined.coefficients:
         context.set_status("partial", "target_variable_missing")
-        context.add_step(f"No term with ${variable_name}$ appears after simplification.")
+        context.add_step(
+            _msg(
+                context,
+                "equation.linear.target_variable_missing",
+                "$$ {variable} $$",
+                variable=variable_name,
+            )
+        )
         return EquationSolution({}, context.solve_status, context.reason_code), context
 
     coefficient = combined.coefficients[variable_name]
     if abs(coefficient) < 1e-12:
         context.set_status("partial", "zero_target_coefficient")
         context.add_step(
-            f"The coefficient of ${variable_name}$ is 0, so direct isolation is not possible."
+            _msg(
+                context,
+                "equation.linear.zero_target_coefficient",
+                "$$ {variable} $$",
+                variable=variable_name,
+            )
         )
         return EquationSolution({}, context.solve_status, context.reason_code), context
 
@@ -710,20 +876,46 @@ def solve_equation(
                 _clean_number(-constant_term),
             )
             context.add_step(
-                f"Add ${_latex(-constant_term)}$ to both sides to isolate the variable term: "
-                + f"$$ {_latex(reduced_equation)} $$"
+                _msg(
+                    context,
+                    "equation.linear.add_to_both_sides",
+                    "$$ {constant} ; {equation} $$",
+                    constant=_latex(-constant_term),
+                    equation=_latex(reduced_equation),
+                )
             )
         if coefficient_term != 1:
             context.add_step(
-                f"Divide both sides by ${_latex(coefficient_term)}$."
+                _msg(
+                    context,
+                    "equation.linear.divide_both_sides",
+                    "$$ {coefficient} $$",
+                    coefficient=_latex(coefficient_term),
+                )
             )
-    context.add_step(f"Isolate ${variable_name}$: $$ {_latex(isolated)} $$")
+    context.add_step(
+        _msg(
+            context,
+            "equation.linear.isolate",
+            "$$ {variable} = {rhs} $$",
+            variable=variable_name,
+            rhs=_latex(rhs_expression),
+        )
+    )
 
     if len(nonzero_variables) == 1:
         numeric_value = _clean_number(float(-combined.constant / coefficient))
         context.add_step(
-            "Therefore, "
-            + f"$$ {variable_name} = {_value_latex(numeric_value, (wording_options.show_exact_and_approximate if wording_options else True))} $$"
+            _msg(
+                context,
+                "equation.linear.solution",
+                "$$ {variable} = {value} $$",
+                variable=variable_name,
+                value=_value_latex(
+                    numeric_value,
+                    (wording_options.show_exact_and_approximate if wording_options else True),
+                ),
+            )
         )
         return (
             EquationSolution({variable_name: numeric_value}, context.solve_status, context.reason_code),
@@ -743,38 +935,47 @@ def solve_system(
     tolerance: float = 1e-10,
     wording_options: Optional[EquationWordingOptions] = None,
 ) -> tuple[EquationSolution, EquationSolveContext]:
+    localizer = Localizer.from_profile(
+        wording_options.explanation_profile if wording_options is not None else None
+    )
     context = EquationSolveContext(
         step_heading_template=(
             wording_options.step_heading_template
             if wording_options is not None
-            else "## Step {number}"
-        )
+            else "## {number}"
+        ),
+        localizer=localizer,
     )
     equations = system.equations if isinstance(system, SystemOfEquations) else system
     context.add_step(
-        "Solve the system:\n$$"
-        + "\\left\\{\\begin{array}{l}"
-        + " \\\\ ".join(_latex(eq) for eq in equations)
-        + "\\end{array}\\right."
-        + "$$"
+        _msg(
+            context,
+            "system.solve.start",
+            "$$\\left\\{\\begin{array}{l}{equations}\\end{array}\\right.$$",
+            equations=" \\\\ ".join(_latex(eq) for eq in equations),
+        )
     )
 
     if not equations:
         context.set_status("partial", "empty_system")
-        context.add_step("No equations were provided.")
+        context.add_step(_msg(context, "system.empty", "$$ \\varnothing $$"))
         return EquationSolution({}, context.solve_status, context.reason_code), context
 
     forms: list[_LinearForm] = []
     for eq in equations:
         if len(eq.expressions) != 2:
             context.set_status("unsolved", "unsupported_equation_arity")
-            context.add_step("Each equation must have exactly two sides.")
+            context.add_step(
+                _msg(context, "system.unsupported_equation_arity", "$$ \\text{unsupported equation arity} $$")
+            )
             return EquationSolution({}, context.solve_status, context.reason_code), context
         lhs_ok, lhs_form = _linearize(eq.expressions[0])
         rhs_ok, rhs_form = _linearize(eq.expressions[1])
         if not lhs_ok or not rhs_ok:
             context.set_status("partial", "nonlinear_or_unsupported_terms")
-            context.add_step("At least one equation is nonlinear or unsupported.")
+            context.add_step(
+                _msg(context, "system.nonlinear_or_unsupported", "$$ \\text{nonlinear/unsupported} $$")
+            )
             return EquationSolution({}, context.solve_status, context.reason_code), context
         forms.append(_add_forms(lhs_form, _scale_form(rhs_form, -1.0)))
 
@@ -789,7 +990,7 @@ def solve_system(
         ]
     if not variable_names:
         context.set_status("partial", "no_variables")
-        context.add_step("The system has no variables after simplification.")
+        context.add_step(_msg(context, "system.no_variables", "$$ \\text{no variables} $$"))
         return EquationSolution({}, context.solve_status, context.reason_code), context
 
     matrix: list[list[Fraction]] = []
@@ -802,8 +1003,12 @@ def solve_system(
     cols = len(variable_names)
     if wording_options is None or wording_options.show_matrix_state:
         context.add_step(
-            "Write the augmented matrix:\n"
-            + f"$${_matrix_latex(matrix, variable_names)}$$"
+            _msg(
+                context,
+                "system.matrix.initial",
+                "$${matrix}$$",
+                matrix=_matrix_latex(matrix, variable_names),
+            )
         )
     pivot_row = 0
     pivot_columns: list[int] = []
@@ -820,7 +1025,13 @@ def solve_system(
             continue
         if candidate != pivot_row:
             matrix[pivot_row], matrix[candidate] = matrix[candidate], matrix[pivot_row]
-            step = f"Swap row {pivot_row + 1} with row {candidate + 1}."
+            step = _msg(
+                context,
+                "system.row.swap",
+                "$$ R_{row_a} \\leftrightarrow R_{row_b} $$",
+                row_a=pivot_row + 1,
+                row_b=candidate + 1,
+            )
             if wording_options is None or wording_options.show_matrix_state:
                 step += "\n" + f"$${_matrix_latex(matrix, variable_names)}$$"
             context.add_step(step)
@@ -828,8 +1039,12 @@ def solve_system(
         if abs(float(pivot)) > tolerance and pivot != 1:
             for j in range(col, cols + 1):
                 matrix[pivot_row][j] /= pivot
-            step = (
-                f"Normalize row {pivot_row + 1} by dividing by ${_fraction_to_latex(pivot)}$."
+            step = _msg(
+                context,
+                "system.row.normalize",
+                "$$ R_{row} \\div {pivot} $$",
+                row=pivot_row + 1,
+                pivot=_fraction_to_latex(pivot),
             )
             if wording_options is None or wording_options.show_matrix_state:
                 step += "\n" + f"$${_matrix_latex(matrix, variable_names)}$$"
@@ -842,8 +1057,13 @@ def solve_system(
                 continue
             for j in range(col, cols + 1):
                 matrix[row][j] -= factor * matrix[pivot_row][j]
-            step = (
-                f"Eliminate column {col + 1} in row {row + 1} using factor ${_fraction_to_latex(factor)}$."
+            step = _msg(
+                context,
+                "system.row.eliminate",
+                "$$ C_{column}, R_{row}, {factor} $$",
+                column=col + 1,
+                row=row + 1,
+                factor=_fraction_to_latex(factor),
             )
             if wording_options is None or wording_options.show_matrix_state:
                 step += "\n" + f"$${_matrix_latex(matrix, variable_names)}$$"
@@ -857,12 +1077,12 @@ def solve_system(
         lhs_norm = sum(abs(float(matrix[row][col])) for col in range(cols))
         if lhs_norm <= tolerance and abs(float(matrix[row][cols])) > tolerance:
             context.set_status("unsolved", "no_solution")
-            context.add_step("A row reduced to $0 = c$ with $c \\neq 0$, so the system is inconsistent.")
+            context.add_step(_msg(context, "system.inconsistent", "$$ \\bot $$"))
             return EquationSolution({}, context.solve_status, context.reason_code), context
 
     if len(pivot_columns) < cols:
         context.set_status("partial", "infinite_solutions")
-        context.add_step("Not every variable has a pivot; the system has infinitely many solutions.")
+        context.add_step(_msg(context, "system.infinite_solutions", "$$ \\infty \\text{ solutions} $$"))
         return EquationSolution({}, context.solve_status, context.reason_code), context
 
     values: dict[str, object] = {}
@@ -872,5 +1092,12 @@ def solve_system(
         f"{name} = {_value_latex(value, (wording_options.show_exact_and_approximate if wording_options else True))}"
         for name, value in sorted(values.items())
     )
-    context.add_step(f"Unique solution found: $$ {solution_display} $$")
+    context.add_step(
+        _msg(
+            context,
+            "system.solution.unique",
+            "$$ {solution} $$",
+            solution=solution_display,
+        )
+    )
     return EquationSolution(values, context.solve_status, context.reason_code), context
