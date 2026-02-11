@@ -34,6 +34,7 @@ def _build_case(
     unsolvable_probability: float,
     hard_problem_probability: float,
     locale: str,
+    style_type: str,
     message_overrides: dict[str, str],
     exact_text_overrides: dict[str, str],
 ):
@@ -66,6 +67,7 @@ def _build_case(
         calculator_mode=CalculatorModeOptions(enabled=calculator_mode_enabled),
         explanation_profile=ExplanationProfile(
             locale=locale,
+            style_type=style_type,
             message_overrides=message_overrides,
             exact_text_overrides=exact_text_overrides,
         ),
@@ -185,6 +187,11 @@ def main():
         help="Disable calculator mode while generating manual-review explanations.",
     )
     parser.add_argument("--locale", type=str, default="en")
+    parser.add_argument(
+        "--style-type",
+        choices=["default", "compact", "plain", "xml"],
+        default="default",
+    )
     parser.add_argument("--messages-file", type=str, default=None)
     parser.add_argument("--exact-text-overrides-file", type=str, default=None)
     parser.add_argument(
@@ -216,6 +223,7 @@ def main():
                 unsolvable_probability=args.unsolvable_probability,
                 hard_problem_probability=args.hard_problem_probability,
                 locale=args.locale,
+                style_type=args.style_type,
                 message_overrides=message_overrides,
                 exact_text_overrides=exact_text_overrides,
             )
@@ -229,6 +237,7 @@ def main():
     localizer = Localizer.from_profile(
         ExplanationProfile(
             locale=args.locale,
+            style_type=args.style_type,
             message_overrides=message_overrides,
             exact_text_overrides=exact_text_overrides,
         )

@@ -12,6 +12,13 @@ from .evaluator import (
 from .localization import ExplanationProfile
 from .expression import *
 from .equation_generation import generate_random_equation_problem
+from .language_packs import (
+    locale_equal_to_english_keys,
+    supported_locales,
+    supported_style_types,
+    validate_pack_placeholders,
+)
+from .localization_catalog import collect_catalog, validate_locale_packs
 from .render import render_latex
 from .procedural import FUNCTIONS, ExpressionContext, generate_random_expression
 from .solve_equation import EquationWordingOptions, solve_equation, solve_system
@@ -397,6 +404,41 @@ def run_options_tests():
     nested_render = nested_ctx.render()
     tests.append(("nested template references open", "[[1]]" in nested_render))
     tests.append(("nested template references close", "[[/ 1]]" in nested_render))
+
+    # Built-in locale pack should apply without custom overrides.
+    locale_options = EquationWordingOptions(
+        explanation_profile=ExplanationProfile(locale="es")
+    )
+    _, locale_ctx = solve_equation(Equation([x]), wording_options=locale_options)
+    tests.append(("builtin locale spanish equation message", "solo admite" in locale_ctx.render().lower()))
+
+    # Built-in style type should apply without custom formatting overrides.
+    xml_style_options = EvaluatorOptions(
+        explanation_profile=ExplanationProfile(style_type="xml")
+    )
+    _, xml_style_ctx = evaluate(Sum([4, 7.90623]), options=xml_style_options, error_on_invalid_snap=False)
+    xml_render = xml_style_ctx.render()
+    tests.append(("builtin style xml wrapper", "<steps>" in xml_render and "<step index=" in xml_render))
+
+    locales = supported_locales()
+    tests.append(("supported locales include requested packs", all(k in locales for k in ["es", "fr", "de", "ko", "he", "he-niqqud"])))
+    styles = supported_style_types()
+    tests.append(("supported style types include xml", "xml" in styles))
+    placeholder_errors = []
+    for locale in locales:
+        placeholder_errors.extend(validate_pack_placeholders(locale))
+    tests.append(("builtin locale placeholder validation", len(placeholder_errors) == 0))
+    untranslated = []
+    for locale in locales:
+        untranslated.extend(
+            [f"{locale}:{key}" for key in locale_equal_to_english_keys(locale)]
+        )
+    tests.append(("builtin locale full coverage (no english leakage)", len(untranslated) == 0))
+
+    catalog = collect_catalog()
+    tests.append(("localization catalog has many keys", catalog.get("total_keys", 0) >= 80))
+    catalog_validation_errors = validate_locale_packs()
+    tests.append(("catalog-driven locale validation", len(catalog_validation_errors) == 0))
 
     return tests
 

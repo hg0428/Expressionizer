@@ -7,3 +7,4 @@ from .procedural import *
 from .equation_generation import *
 from .solve_equation import *
 from .localization import *
+from .language_packs import *

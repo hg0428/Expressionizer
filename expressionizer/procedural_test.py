@@ -111,6 +111,7 @@ def _build_eval_options(payload: dict[str, Any]) -> EvaluatorOptions:
     step_heading_template = payload.get("step_heading_template", "## {number}")
     explanation_profile = ExplanationProfile(
         locale=payload.get("locale", "en"),
+        style_type=payload.get("style_type", "default"),
         message_overrides=payload.get("message_overrides", {}),
         exact_text_overrides=payload.get("exact_text_overrides", {}),
     )
@@ -144,6 +145,7 @@ def _worker(payload: dict[str, Any], output_queue: Any):
             step_heading_template=payload.get("step_heading_template", "## {number}"),
             explanation_profile=ExplanationProfile(
                 locale=payload.get("locale", "en"),
+                style_type=payload.get("style_type", "default"),
                 message_overrides=payload.get("message_overrides", {}),
                 exact_text_overrides=payload.get("exact_text_overrides", {}),
             ),
@@ -376,6 +378,7 @@ def _print_failure_and_repro(result: dict[str, Any], args: argparse.Namespace):
         + ("--compact-explanations " if args.compact_explanations else "")
         + f"--step-heading-template {json.dumps(args.step_heading_template)} "
         + f"--locale {args.locale} "
+        + f"--style-type {args.style_type} "
         + (f"--messages-file {json.dumps(args.messages_file)} " if args.messages_file else "")
         + (
             f"--exact-text-overrides-file {json.dumps(args.exact_text_overrides_file)}"
@@ -517,6 +520,12 @@ def main():
     )
     parser.add_argument("--locale", type=str, default="en")
     parser.add_argument(
+        "--style-type",
+        choices=["default", "compact", "plain", "xml"],
+        default="default",
+        help="Built-in rendering style overlay.",
+    )
+    parser.add_argument(
         "--messages-file",
         type=str,
         default=None,
@@ -574,6 +583,7 @@ def main():
             "compact_explanations": args.compact_explanations,
             "step_heading_template": args.step_heading_template,
             "locale": args.locale,
+            "style_type": args.style_type,
             "message_overrides": message_overrides,
             "exact_text_overrides": exact_text_overrides,
         }

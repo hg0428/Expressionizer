@@ -29,6 +29,7 @@ def _build_case(
     mode: str,
     step_heading_template: str,
     locale: str,
+    style_type: str,
     message_overrides: dict[str, str],
     exact_text_overrides: dict[str, str],
 ) -> dict[str, Any]:
@@ -44,6 +45,7 @@ def _build_case(
         step_heading_template=step_heading_template,
         explanation_profile=ExplanationProfile(
             locale=locale,
+            style_type=style_type,
             message_overrides=message_overrides,
             exact_text_overrides=exact_text_overrides,
         ),
@@ -146,6 +148,11 @@ def main() -> int:
         default="## {number}",
     )
     parser.add_argument("--locale", type=str, default="en")
+    parser.add_argument(
+        "--style-type",
+        choices=["default", "compact", "plain", "xml"],
+        default="default",
+    )
     parser.add_argument("--messages-file", type=str, default=None)
     parser.add_argument("--exact-text-overrides-file", type=str, default=None)
     parser.add_argument(
@@ -173,6 +180,7 @@ def main() -> int:
                 mode=args.mode,
                 step_heading_template=args.step_heading_template,
                 locale=args.locale,
+                style_type=args.style_type,
                 message_overrides=message_overrides,
                 exact_text_overrides=exact_text_overrides,
             )
@@ -186,6 +194,7 @@ def main() -> int:
     localizer = Localizer.from_profile(
         ExplanationProfile(
             locale=args.locale,
+            style_type=args.style_type,
             message_overrides=message_overrides,
             exact_text_overrides=exact_text_overrides,
         )

@@ -231,6 +231,7 @@ result, context = evaluate(
 `ExplanationProfile` fields:
 
 - `locale`: logical locale tag (used for per-call routing and future locale packs)
+- `style_type`: built-in style overlay (`default|compact|plain|xml`)
 - `missing_key_policy`: `fallback|marker|error` for unresolved localization keys
 - `message_overrides`: key-based template overrides (`key -> string`)
 - `exact_text_overrides`: exact-string overrides for legacy/unkeyed text (`text -> string`)
@@ -242,6 +243,78 @@ Defaults are production-safe:
 - set `missing_key_policy="error"` to require every encountered key be supplied in `message_overrides`
 - set `missing_key_policy="fallback"` (default) to use built-in safe defaults when a key is not overridden
 - set `missing_key_policy="marker"` to surface unresolved keys as `[[key]]` while debugging
+
+Built-in locale packs currently include:
+
+- `en`
+- `es`
+- `fr`
+- `de`
+- `ko`
+- `he`
+- `he-niqqud`
+
+Changing language per generation:
+
+```python
+from expressionizer import EvaluatorOptions, ExplanationProfile, evaluate
+
+# One call in Spanish
+_, es_context = evaluate(
+    expr,
+    substitutions=substitutions,
+    options=EvaluatorOptions(
+        explanation_profile=ExplanationProfile(locale="es")
+    ),
+)
+
+# Another call in Korean (same expression, different language)
+_, ko_context = evaluate(
+    expr,
+    substitutions=substitutions,
+    options=EvaluatorOptions(
+        explanation_profile=ExplanationProfile(locale="ko")
+    ),
+)
+```
+
+For dataset generation, pick locale per sample:
+
+```python
+import random
+from expressionizer import EvaluatorOptions, ExplanationProfile, evaluate, supported_locales
+
+candidate_locales = [loc for loc in supported_locales() if loc != "en"]
+
+def render_one(expr, substitutions):
+    locale = random.choice(candidate_locales)
+    _, context = evaluate(
+        expr,
+        substitutions=substitutions,
+        options=EvaluatorOptions(
+            explanation_profile=ExplanationProfile(locale=locale)
+        ),
+    )
+    return locale, context.render()
+```
+
+Language selection works the same way for equation solving:
+
+```python
+from expressionizer import EquationWordingOptions, ExplanationProfile, solve_equation
+
+solution, eq_context = solve_equation(
+    equation,
+    wording_options=EquationWordingOptions(
+        explanation_profile=ExplanationProfile(locale="he-niqqud")
+    ),
+)
+```
+
+Built-in locale packs are validated for:
+
+- placeholder safety (no missing/extra formatting placeholders),
+- no accidental English leakage for built-in keys in non-English packs.
 
 You can customize formatting structure too (not just wording), including heading style,
 step wrappers, separators, and line breaks:
@@ -274,6 +347,34 @@ Template layering is supported with `{{other.key}}` references:
   "render.step.block": "{{render.step.open}}{newline}{body}{newline}{{render.step.close}}"
 }
 ```
+
+Built-in style overlays can be selected per call:
+
+```python
+from expressionizer import EvaluatorOptions, ExplanationProfile, evaluate
+
+_, context = evaluate(
+    expr,
+    substitutions=substitutions,
+    options=EvaluatorOptions(
+        explanation_profile=ExplanationProfile(
+            locale="es",
+            style_type="xml",
+        )
+    ),
+)
+```
+
+Language-pack quality tooling:
+
+- `python -m expressionizer.localization_catalog --output localization_keys.json`
+  - Generates a canonical key catalog for translators and reviewers.
+- `python -m expressionizer.localization_catalog --validate-only`
+  - Validates built-in locale packs against the full catalog, including runtime fallback gaps.
+- `python -m expressionizer.localization_catalog --validate-only --print-coverage`
+  - Prints per-locale key coverage summary using the catalog.
+- `python -m expressionizer.localization_catalog --validate-only --require-full-locale-coverage`
+  - Fails validation if any non-English locale still falls back to English for tracked keys.
 
 For long numeric arithmetic, you can enable/configure calculator mode. This is useful for
 student-friendly readability and for AI training-data workflows that need tool-call placeholders:
@@ -356,6 +457,7 @@ CLI tools also support:
 - `--compact-explanations`
 - `--step-heading-template "### Phase {number}"`
 - `--locale en`
+- `--style-type default|compact|plain|xml`
 - `--messages-file path/to/messages.json`
 - `--exact-text-overrides-file path/to/exact_text_overrides.json`
 - `--generation-profile realistic|stress`
@@ -383,6 +485,8 @@ CLI tools also support:
 - `python -m expressionizer.equation_manual_review_cases --cases 40`
   - Generates a markdown set of equation/system explanations for manual review
   - Supports localization overrides with `--locale`, `--messages-file`, and `--exact-text-overrides-file`
+- `python -m expressionizer.localization_catalog --validate-only`
+  - Validates locale packs against catalog coverage + placeholder consistency
 - `python release_smoke.py`
   - Runs a quick pre-release local smoke check
 

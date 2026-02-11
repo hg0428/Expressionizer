@@ -596,8 +596,15 @@ class EvaluatorContext:
         def _step_heading(step_number: int) -> str:
             template = self.localizer.template("step.heading", "## {number}")
             options = self.options.wording_options
+            prefer_default = False
             if options is not None and getattr(options, "step_heading_template", None):
                 template = options.step_heading_template
+                prefer_default = True
+            template = self.localizer.template(
+                "step.heading",
+                template,
+                prefer_default=prefer_default,
+            )
             try:
                 return template.format(number=step_number)
             except Exception:

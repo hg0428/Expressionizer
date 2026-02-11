@@ -31,6 +31,7 @@ class EquationSolveContext:
     steps: list[str] = field(default_factory=list)
     step_heading_template: str = "## {number}"
     localizer: Optional[Localizer] = None
+    prefer_step_heading_template: bool = False
 
     def add_step(self, text: str):
         if self.localizer is not None:
@@ -68,7 +69,11 @@ class EquationSolveContext:
         for index, step in enumerate(self.steps, 1):
             template = self.step_heading_template
             if self.localizer is not None:
-                template = self.localizer.template("step.heading", template)
+                template = self.localizer.template(
+                    "step.heading",
+                    template,
+                    prefer_default=self.prefer_step_heading_template,
+                )
             try:
                 heading = template.format(number=index)
             except Exception:
@@ -752,6 +757,7 @@ def solve_equation(
             else "## {number}"
         ),
         localizer=localizer,
+        prefer_step_heading_template=wording_options is not None,
     )
     context.add_step(
         _msg(context, "equation.solve.start", "$$ {equation} $$", equation=_latex(eq))
@@ -945,6 +951,7 @@ def solve_system(
             else "## {number}"
         ),
         localizer=localizer,
+        prefer_step_heading_template=wording_options is not None,
     )
     equations = system.equations if isinstance(system, SystemOfEquations) else system
     context.add_step(

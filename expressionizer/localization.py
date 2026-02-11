@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
+from .language_packs import StyleType, get_builtin_messages
+
 
 LocaleTag = Literal["en"] | str
 
@@ -12,6 +14,7 @@ LocaleTag = Literal["en"] | str
 @dataclass
 class ExplanationProfile:
     locale: LocaleTag = "en"
+    style_type: StyleType = "default"
     missing_key_policy: Literal["fallback", "marker", "error"] = "fallback"
     message_overrides: dict[str, str] = field(default_factory=dict)
     exact_text_overrides: dict[str, str] = field(default_factory=dict)
@@ -37,14 +40,17 @@ class Localizer:
     def __init__(
         self,
         locale: str = "en",
+        style_type: StyleType = "default",
         missing_key_policy: Literal["fallback", "marker", "error"] = "fallback",
         message_overrides: Optional[dict[str, str]] = None,
         exact_text_overrides: Optional[dict[str, str]] = None,
     ):
         self.locale = (locale or "en").lower()
+        self.style_type = style_type
         self.missing_key_policy = missing_key_policy
         self.message_overrides = message_overrides or {}
         self.exact_text_overrides = exact_text_overrides or {}
+        self.builtin_messages = get_builtin_messages(self.locale, self.style_type)
 
     _template_ref_pattern = re.compile(r"\{\{([a-zA-Z0-9_.-]+)\}\}")
 
@@ -54,15 +60,26 @@ class Localizer:
             return cls()
         return cls(
             locale=profile.locale,
+            style_type=profile.style_type,
             missing_key_policy=profile.missing_key_policy,
             message_overrides=profile.message_overrides,
             exact_text_overrides=profile.exact_text_overrides,
         )
 
-    def template(self, key: str, default: Optional[str] = None) -> str:
+    def template(
+        self,
+        key: str,
+        default: Optional[str] = None,
+        prefer_default: bool = False,
+    ) -> str:
         value = self.message_overrides.get(key)
         if value is not None:
             return value
+        if prefer_default and default is not None:
+            return default
+        builtin_value = self.builtin_messages.get(key)
+        if builtin_value is not None:
+            return builtin_value
         if self.missing_key_policy == "error":
             raise KeyError(f"Missing localization key: {key}")
         if default is not None:

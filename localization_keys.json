@@ -1,0 +1,609 @@
+{
+  "keys": [
+    {
+      "key": "addition_borrow_suffix",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "addition_carry_row",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "addition_carry_suffix",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "addition_decompose_intro",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "addition_put_together",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "base_trivial_power",
+      "default_template": "1 to any power is 1.",
+      "placeholders": []
+    },
+    {
+      "key": "calculator.fallback",
+      "default_template": "$$ {expression} = {result} $$",
+      "placeholders": [
+        "expression",
+        "result"
+      ]
+    },
+    {
+      "key": "derivative_result",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "domain_error_function",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "domain_error_generic",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "equation.linear.add_to_both_sides",
+      "default_template": "$$ {constant} ; {equation} $$",
+      "placeholders": [
+        "constant",
+        "equation"
+      ]
+    },
+    {
+      "key": "equation.linear.contradiction",
+      "default_template": "$$ \\bot $$",
+      "placeholders": []
+    },
+    {
+      "key": "equation.linear.divide_both_sides",
+      "default_template": "$$ {coefficient} $$",
+      "placeholders": [
+        "coefficient"
+      ]
+    },
+    {
+      "key": "equation.linear.identity",
+      "default_template": "$$ 0 = 0 $$",
+      "placeholders": []
+    },
+    {
+      "key": "equation.linear.isolate",
+      "default_template": "$$ {variable} = {rhs} $$",
+      "placeholders": [
+        "rhs",
+        "variable"
+      ]
+    },
+    {
+      "key": "equation.linear.multiple_variables",
+      "default_template": "$$ \\text{multiple variables remain} $$",
+      "placeholders": []
+    },
+    {
+      "key": "equation.linear.solution",
+      "default_template": "$$ {variable} = {value} $$",
+      "placeholders": [
+        "value",
+        "variable"
+      ]
+    },
+    {
+      "key": "equation.linear.standard_form",
+      "default_template": "$$ {canonical} $$",
+      "placeholders": [
+        "canonical"
+      ]
+    },
+    {
+      "key": "equation.linear.target_variable_missing",
+      "default_template": "$$ {variable} $$",
+      "placeholders": [
+        "variable"
+      ]
+    },
+    {
+      "key": "equation.linear.zero_target_coefficient",
+      "default_template": "$$ {variable} $$",
+      "placeholders": [
+        "variable"
+      ]
+    },
+    {
+      "key": "equation.nonlinear.target_variable_required",
+      "default_template": "$$ \\text{target variable required} $$",
+      "placeholders": []
+    },
+    {
+      "key": "equation.nonlinear.unsupported_pattern",
+      "default_template": "$$ \\text{unsupported nonlinear pattern} $$",
+      "placeholders": []
+    },
+    {
+      "key": "equation.quadratic.discriminant",
+      "default_template": "$$\\Delta = b^2 - 4ac = {discriminant}$$",
+      "placeholders": [
+        "discriminant"
+      ]
+    },
+    {
+      "key": "equation.quadratic.formula",
+      "default_template": "$$ {variable} = \\frac{{-b \\pm \\sqrt{{\\Delta}}}}{{2a}} $$",
+      "placeholders": [
+        "variable"
+      ]
+    },
+    {
+      "key": "equation.quadratic.no_real",
+      "default_template": "$$ \\Delta < 0 $$",
+      "placeholders": []
+    },
+    {
+      "key": "equation.quadratic.rearrange",
+      "default_template": "$$ {canonical} $$",
+      "placeholders": [
+        "canonical"
+      ]
+    },
+    {
+      "key": "equation.quadratic.repeated_root",
+      "default_template": "$$ {variable} = {value} $$",
+      "placeholders": [
+        "value",
+        "variable"
+      ]
+    },
+    {
+      "key": "equation.quadratic.solution_set",
+      "default_template": "$$ {variable} \\in \\{{{v1}, {v2}\\}} $$",
+      "placeholders": [
+        "v1",
+        "v2",
+        "variable"
+      ]
+    },
+    {
+      "key": "equation.rational.canonical_after_clear",
+      "default_template": "$$ {canonical} $$",
+      "placeholders": [
+        "canonical"
+      ]
+    },
+    {
+      "key": "equation.rational.clear_denominator",
+      "default_template": "$$ \\times {variable} $$",
+      "placeholders": [
+        "variable"
+      ]
+    },
+    {
+      "key": "equation.rational.discriminant",
+      "default_template": "$$\\Delta = {discriminant}$$",
+      "placeholders": [
+        "discriminant"
+      ]
+    },
+    {
+      "key": "equation.rational.domain_rejection",
+      "default_template": "$$ {variable} \\neq 0 $$",
+      "placeholders": [
+        "variable"
+      ]
+    },
+    {
+      "key": "equation.rational.domain_restriction",
+      "default_template": "$$ {variable} \\neq 0 $$",
+      "placeholders": [
+        "variable"
+      ]
+    },
+    {
+      "key": "equation.rational.identity_domain",
+      "default_template": "$$ \\text{identity on domain} $$",
+      "placeholders": []
+    },
+    {
+      "key": "equation.rational.inconsistent",
+      "default_template": "$$ \\bot $$",
+      "placeholders": []
+    },
+    {
+      "key": "equation.rational.linear_solution",
+      "default_template": "$$ {variable} = {value} $$",
+      "placeholders": [
+        "value",
+        "variable"
+      ]
+    },
+    {
+      "key": "equation.rational.no_real",
+      "default_template": "$$ \\Delta < 0 $$",
+      "placeholders": []
+    },
+    {
+      "key": "equation.rational.valid_solution",
+      "default_template": "$$ {variable} = {value} $$",
+      "placeholders": [
+        "value",
+        "variable"
+      ]
+    },
+    {
+      "key": "equation.rational.valid_solutions",
+      "default_template": "$$ {variable} \\in \\{{{v1}, {v2}\\}} $$",
+      "placeholders": [
+        "v1",
+        "v2",
+        "variable"
+      ]
+    },
+    {
+      "key": "equation.solve.start",
+      "default_template": "$$ {equation} $$",
+      "placeholders": [
+        "equation"
+      ]
+    },
+    {
+      "key": "equation.unsupported_equation_arity",
+      "default_template": "$$ \\text{unsupported equation arity} $$",
+      "placeholders": []
+    },
+    {
+      "key": "equation_manual_review.case_heading",
+      "default_template": "## [[equation_manual_review.case]] {index} (seed={seed}, difficulty={difficulty}, kind={kind})",
+      "placeholders": [
+        "difficulty",
+        "index",
+        "kind",
+        "seed"
+      ]
+    },
+    {
+      "key": "equation_manual_review.problem",
+      "default_template": "- [[equation_manual_review.problem]]: ${problem}$",
+      "placeholders": [
+        "problem"
+      ]
+    },
+    {
+      "key": "equation_manual_review.solution",
+      "default_template": "- [[equation_manual_review.solution]]: `{solution}`",
+      "placeholders": [
+        "solution"
+      ]
+    },
+    {
+      "key": "equation_manual_review.status",
+      "default_template": "- [[equation_manual_review.status]]: `{solve_status}` | [[equation_manual_review.reason_code]]: `{reason_code}`",
+      "placeholders": [
+        "reason_code",
+        "solve_status"
+      ]
+    },
+    {
+      "key": "equation_manual_review.subtitle",
+      "default_template": "[[equation_manual_review.subtitle]]",
+      "placeholders": []
+    },
+    {
+      "key": "equation_manual_review.title",
+      "default_template": "[[equation_manual_review.title]]",
+      "placeholders": []
+    },
+    {
+      "key": "integral_definite_result",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "integral_indefinite_result",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "manual_review.answer",
+      "default_template": "- [[manual_review.answer]]: ${answer}$",
+      "placeholders": [
+        "answer"
+      ]
+    },
+    {
+      "key": "manual_review.case_heading",
+      "default_template": "## [[manual_review.case]] {index} (seed={seed}, difficulty={difficulty}, guarantee_solvable={guarantee_solvable})",
+      "placeholders": [
+        "difficulty",
+        "guarantee_solvable",
+        "index",
+        "seed"
+      ]
+    },
+    {
+      "key": "manual_review.problem",
+      "default_template": "- [[manual_review.problem]]: ${expression}$",
+      "placeholders": [
+        "expression"
+      ]
+    },
+    {
+      "key": "manual_review.status",
+      "default_template": "- [[manual_review.status]]: `{solve_status}` | [[manual_review.reason_code]]: `{reason_code}` | [[manual_review.approximate]]: `{approximate}`",
+      "placeholders": [
+        "approximate",
+        "reason_code",
+        "solve_status"
+      ]
+    },
+    {
+      "key": "manual_review.subtitle",
+      "default_template": "[[manual_review.subtitle]]",
+      "placeholders": []
+    },
+    {
+      "key": "manual_review.title",
+      "default_template": "[[manual_review.title]]",
+      "placeholders": []
+    },
+    {
+      "key": "minus_one_power_parity",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "multiply_approximate_a",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "multiply_approximate_b",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "multiply_complex_intro",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "multiply_decimal_shift_a",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "multiply_decimal_shift_b",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "multiply_table_header",
+      "default_template": "\n**Partial-product table:**",
+      "placeholders": []
+    },
+    {
+      "key": "multiply_values_list_header",
+      "default_template": "**Add these partial values by place value:**",
+      "placeholders": []
+    },
+    {
+      "key": "overflow_infinity",
+      "default_template": "${previous}$ is outside the configured exponent limit, so we'll approximate it as $\\infty$.",
+      "placeholders": [
+        "previous"
+      ]
+    },
+    {
+      "key": "overflow_python_infinity",
+      "default_template": "${previous}$ overflowed during numeric evaluation, so we'll approximate it as $\\infty$.",
+      "placeholders": [
+        "previous"
+      ]
+    },
+    {
+      "key": "overflow_python_symbolic",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "overflow_python_zero",
+      "default_template": "${previous}$ overflowed during numeric evaluation, so we'll approximate it as $0$.",
+      "placeholders": [
+        "previous"
+      ]
+    },
+    {
+      "key": "overflow_symbolic",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "overflow_zero",
+      "default_template": "${previous}$ is outside the configured exponent limit, so we'll approximate it as $0$.",
+      "placeholders": [
+        "previous"
+      ]
+    },
+    {
+      "key": "render.document.prefix",
+      "default_template": "",
+      "placeholders": []
+    },
+    {
+      "key": "render.document.suffix",
+      "default_template": "",
+      "placeholders": []
+    },
+    {
+      "key": "render.newline",
+      "default_template": "\n",
+      "placeholders": []
+    },
+    {
+      "key": "render.single_step.block",
+      "default_template": "{body}",
+      "placeholders": [
+        "body"
+      ]
+    },
+    {
+      "key": "render.step.block",
+      "default_template": "{heading}{newline}{body}",
+      "placeholders": [
+        "body",
+        "heading",
+        "newline"
+      ]
+    },
+    {
+      "key": "render.step.joiner",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "render.substep.joiner",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "step.heading",
+      "default_template": "## {number}",
+      "placeholders": [
+        "number"
+      ]
+    },
+    {
+      "key": "substitution.separator_many",
+      "default_template": " [[substitution.separator_many]] ",
+      "placeholders": []
+    },
+    {
+      "key": "substitution.separator_pair",
+      "default_template": " [[substitution.separator_pair]] ",
+      "placeholders": []
+    },
+    {
+      "key": "substitution_intro",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "system.empty",
+      "default_template": "$$ \\varnothing $$",
+      "placeholders": []
+    },
+    {
+      "key": "system.inconsistent",
+      "default_template": "$$ \\bot $$",
+      "placeholders": []
+    },
+    {
+      "key": "system.infinite_solutions",
+      "default_template": "$$ \\infty \\text{ solutions} $$",
+      "placeholders": []
+    },
+    {
+      "key": "system.matrix.initial",
+      "default_template": "$${matrix}$$",
+      "placeholders": [
+        "matrix"
+      ]
+    },
+    {
+      "key": "system.no_variables",
+      "default_template": "$$ \\text{no variables} $$",
+      "placeholders": []
+    },
+    {
+      "key": "system.nonlinear_or_unsupported",
+      "default_template": "$$ \\text{nonlinear/unsupported} $$",
+      "placeholders": []
+    },
+    {
+      "key": "system.row.eliminate",
+      "default_template": "$$ C_{column}, R_{row}, {factor} $$",
+      "placeholders": [
+        "column",
+        "factor",
+        "row"
+      ]
+    },
+    {
+      "key": "system.row.normalize",
+      "default_template": "$$ R_{row} \\div {pivot} $$",
+      "placeholders": [
+        "pivot",
+        "row"
+      ]
+    },
+    {
+      "key": "system.row.swap",
+      "default_template": "$$ R_{row_a} \\leftrightarrow R_{row_b} $$",
+      "placeholders": [
+        "row_a",
+        "row_b"
+      ]
+    },
+    {
+      "key": "system.solution.unique",
+      "default_template": "$$ {solution} $$",
+      "placeholders": [
+        "solution"
+      ]
+    },
+    {
+      "key": "system.solve.start",
+      "default_template": "$$\\left\\{\\begin{array}{l}{equations}\\end{array}\\right.$$",
+      "placeholders": [
+        "array",
+        "equations",
+        "l"
+      ]
+    },
+    {
+      "key": "system.unsupported_equation_arity",
+      "default_template": "$$ \\text{unsupported equation arity} $$",
+      "placeholders": []
+    },
+    {
+      "key": "zero_power_negative",
+      "default_template": "0 raised to a negative power is undefined.",
+      "placeholders": []
+    },
+    {
+      "key": "zero_power_positive",
+      "default_template": "0 raised to a positive power is 0.",
+      "placeholders": []
+    },
+    {
+      "key": "zero_power_symbolic",
+      "default_template": null,
+      "placeholders": []
+    },
+    {
+      "key": "zero_power_zero_one",
+      "default_template": "$0^0$ is configured to evaluate to $1$.",
+      "placeholders": []
+    },
+    {
+      "key": "zero_power_zero_undefined",
+      "default_template": "0^0 is undefined in this evaluator configuration.",
+      "placeholders": []
+    },
+    {
+      "key": "zero_power_zero_zero",
+      "default_template": "$0^0$ is configured to evaluate to $0$.",
+      "placeholders": []
+    }
+  ],
+  "total_keys": 98
+}
